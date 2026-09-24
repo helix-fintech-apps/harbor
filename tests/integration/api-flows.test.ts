@@ -34,6 +34,12 @@ describe("seeded onboarding", () => {
     expect(r.status).toBe(200);
     expect((await me(RITA)).accounts).toHaveLength(2);
   });
+  it("staff can't skip verification for unverified customers; support can't lift a legal freeze", async () => {
+    expect(body(await app.call(as(ADMIN), "POST", `/admin/users/${NIA.id}/kyc`, { state: "approved", reason: "vip" })).error.code).toBe("manual_approval_not_allowed");
+    const agent = DEMO_USERS.find((u) => u.role === "support_agent")!;
+    expect((await app.call(as(agent), "POST", `/admin/users/${OLEG.id}/kyc`, { state: "approved", reason: "x" })).status).toBe(403);
+    expect(body(await app.call(as(ADMIN), "POST", `/admin/users/${RITA.id}/kyc`, { state: "approved", reason: "" })).error.code).toBe("reason_required");
+  });
 });
 
 describe("balances and ACH in", () => {

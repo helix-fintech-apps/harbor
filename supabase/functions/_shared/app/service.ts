@@ -242,7 +242,10 @@ export class HarborService {
     if (!reason?.trim()) throw new ApiError(422, "reason_required", "a reason is required");
     const p = await this.profile(userId);
     if ((to === "approved" && p.kyc_state === "frozen_legal") || to === "frozen_legal") this.requireAdmin(c);
-    void requiresStaff;
+    // Staff can approve only after an automated check routed the customer to review (or to lift a suspension/freeze);
+    // they can never skip verification for unverified/pending/rejected customers.
+    if (to === "approved" && !requiresStaff(p.kyc_state, to)) throw new ApiError(409, "manual_approval_not_allowed", `cannot manually approve a ${p.kyc_state} customer`);
+    if (to === "approved" && p.kyc_state === "rejected") throw new ApiError(409, "manual_approval_not_allowed", "rejected customers must appeal into review first");
     await this.setKyc(userId, to, reason, c.userId);
     return { userId, state: to };
   }
@@ -805,7 +808,9 @@ export class HarborService {
       const checks = (await this.store.list("kyc_checks", { user_id: u.id })).sort((a, b) => b.created_at.localeCompare(a.created_at));
       const accts = [];
       for (const a of await this.store.list("accounts", { user_id: u.id })) accts.push({ id: a.id, kind: a.kind, status: a.status, ...(await this.balanceOf(a.id)) });
-      out.push({ id: u.id, email: u.email, legalName: u.legal_name, role: u.role, kycState: u.kyc_state, tier: u.tier, lastCheck: checks[0] ?? null, accounts: accts });
+      const achDeposits = (await this.store.list("transfers", { user_id: u.id, kind: "ach_in" })).filter((t) => t.status !== "returned")
+        .map((t) => ({ id: t.id, amountCents: Number(t.amount_cents), status: t.status, createdAt: t.created_at }));
+      out.push({ id: u.id, email: u.email, legalName: u.legal_name, role: u.role, kycState: u.kyc_state, tier: u.tier, lastCheck: checks[0] ?? null, accounts: accts, achDeposits });
     }
     return out;
   }
