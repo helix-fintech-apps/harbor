@@ -60,7 +60,7 @@ export default function LinkBank() {
                     {b.nameMatched ? "matched" : "mismatch"}
                   </Badge>
                 </td>
-                <td data-testid="bank-cooling-off">
+                <td data-testid="bank-cooling-off" data-at={b.coolingOffUntil}>
                   {new Date(b.coolingOffUntil).toLocaleString()}
                 </td>
                 <td>

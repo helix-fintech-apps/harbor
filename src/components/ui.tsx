@@ -62,7 +62,7 @@ function summarize(d: any): string {
   if (d.settleAt) bits.push(`Available after ${new Date(d.settleAt).toLocaleString()}`);
   if (d.approved === false) bits.push(`Declined: ${d.reason}`);
   if (d.approved === true) bits.push(`Approved, hold ${formatCents(d.holdCents)}`);
-  if (d.state) bits.push(`KYC: ${d.state} (${d.reason})`);
+  if (d.state) bits.push(`KYC: ${d.state}${d.reason ? ` (${d.reason})` : ""}`);
   if (typeof d.payoutCents === "number") bits.push(`Payout: ${formatCents(d.payoutCents)}`);
   return bits.join(" · ");
 }

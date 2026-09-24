@@ -27,6 +27,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "1.56.1",
     "@types/node": "^22.0.0",
     "@types/pg": "^8.23.1",
     "@types/react": "^18.3.3",

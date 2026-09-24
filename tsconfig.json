@@ -18,5 +18,13 @@
       "@shared/*": ["supabase/functions/_shared/*"]
     }
   },
-  "include": ["src", "tests", "supabase/functions/_shared"]
+  "include": [
+    "src",
+    "tests",
+    "e2e",
+    "supabase/functions/_shared",
+    "playwright.config.ts",
+    "vite.config.ts",
+    "vitest.config.ts"
+  ]
 }
