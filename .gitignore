@@ -1,0 +1,10 @@
+node_modules
+dist
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
+playwright-report
+test-results
+supabase/.temp
+.pgdata
