@@ -139,6 +139,10 @@ do $$ begin
   exception when check_violation then null; end;
 end $$;
 
+insert into linked_banks (id, user_id, provider, institution, mask, name_matched) values
+  ('50000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', 'fake', 'First Platypus Bank', '1234', true);
+insert into bank_access_tokens (linked_bank_id, access_token) values ('50000000-0000-0000-0000-000000000001', 'access-fake-secret');
+
 -- 7. RLS: customers see only their own rows; cannot write; cannot call post_ledger_txn.
 grant select on all tables in schema public to authenticated;
 set role authenticated;
@@ -149,6 +153,7 @@ do $$ begin
   assert (select count(*) from ledger_lines) = 0, 'ben sees no ledger lines of ava';
   assert (select count(*) from cards) = 0, 'ben sees no cards of ava';
   assert (select count(*) from fee_schedules) = 1, 'fees are public';
+  assert (select count(*) from linked_banks) = 0, 'ben cannot see ava banks';
   begin insert into transfers (user_id, kind, amount_cents, status, policy_version, fee_version) values ('00000000-0000-0000-0000-00000000000b', 'p2p', 100, 'completed', 1, 1); raise exception 'CLIENT WRITE ALLOWED';
   exception when insufficient_privilege then null; end;
   begin update profiles set kyc_state = 'approved'; raise exception 'CLIENT KYC SELF-APPROVE';
@@ -162,6 +167,9 @@ do $$ begin
   assert (select count(*) from ledger_lines) = 2, 'ava sees her own customer ledger lines only';
   assert (select available_cents from account_available where kind = 'checking') = 4001, 'ava available via view';
   assert (select count(*) from statement_lines) = 2, 'statement lines visible';
+  assert (select count(*) from linked_banks) = 1, 'ava sees her bank';
+  assert (select count(*) from bank_access_tokens) = 0, 'access tokens are never visible to clients';
+  assert (select count(*) from idempotency_keys) = 0, 'idempotency keys hidden';
 end $$;
 set request.jwt.claim.sub = '00000000-0000-0000-0000-0000000000ad';
 do $$ begin

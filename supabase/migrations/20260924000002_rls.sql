@@ -3,7 +3,7 @@
 
 do $$ declare t text;
 begin
-  foreach t in array array['money_policies','fee_schedules','profiles','kyc_checks','accounts','linked_banks','direct_deposit_forms',
+  foreach t in array array['money_policies','fee_schedules','profiles','kyc_checks','accounts','linked_banks','bank_access_tokens','direct_deposit_forms',
     'family_members','cards','holds','transfers','payees','card_authorizations','card_refunds','disputes','interest_accruals',
     'interest_postings','closures','ledger_txns','ledger_lines','idempotency_keys','provider_events','audit_log']
   loop
@@ -55,7 +55,7 @@ create policy "ledger txns" on ledger_txns for select
   using (is_staff() or exists (select 1 from ledger_lines l where l.txn_id = ledger_txns.id and
     ((l.account = 'customer_deposits' and owns_account(l.party)) or (l.account = 'family_allowance' and sees_member(l.party)))));
 create policy "audit staff" on audit_log for select using (is_staff());
--- idempotency_keys and provider_events: service role only (no policies => no rows for clients).
+-- idempotency_keys, provider_events, bank_access_tokens: service role only (no policies => no rows for clients).
 
 grant select on account_balances, account_available, allowance_balances, statement_lines to authenticated;
 

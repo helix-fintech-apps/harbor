@@ -57,7 +57,7 @@ export function canIssueCard(kyc: KycState, kind: CardKind, existing: Card[], po
 }
 
 export type DeclineReason =
-  | "invalid_amount" | "card_frozen" | "card_canceled" | "card_inactive" | "kyc_not_approved"
+  | "invalid_amount" | "account_frozen" | "card_frozen" | "card_canceled" | "card_inactive" | "kyc_not_approved"
   | "velocity" | "daily_limit" | "monthly_limit" | "insufficient_funds"
   | "member_inactive" | "mcc_blocked" | "per_txn_limit" | "member_daily_limit" | "member_monthly_limit" | "allowance_exceeded";
 
@@ -71,6 +71,7 @@ export interface AuthRequest {
 
 export interface AuthContext {
   card: Card;
+  accountStatus?: "open" | "frozen" | "closing" | "closed";
   ownerKyc: KycState;
   ownerTier: Tier;
   ownerUsage: UsageEvent[];            // card_spend events on the owner's account (all cards)
@@ -107,6 +108,7 @@ export function authorize(req: AuthRequest, ctx: AuthContext, policy: MoneyPolic
   if (ctx.card.status === "frozen") return no("card_frozen");
   if (ctx.card.status === "canceled" || ctx.card.status === "replaced") return no("card_canceled");
   if (ctx.card.status !== "active") return no("card_inactive");
+  if (ctx.accountStatus && ctx.accountStatus !== "open") return no("account_frozen");
   if (!canMoveMoney(ctx.ownerKyc)) return no("kyc_not_approved");
   if (velocityExceeded(ctx.recentAuthAttempts, ctx.now, policy)) return no("velocity");
 

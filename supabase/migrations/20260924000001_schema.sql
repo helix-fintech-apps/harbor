@@ -41,7 +41,7 @@ create table profiles (
 create table kyc_checks (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references profiles(id) on delete cascade,
-  provider text not null check (provider in ('fake','stripe_identity')),
+  provider text not null check (provider in ('fake','stripe_identity','manual')),
   session_id text,
   identity_status text,               -- raw vendor status (unknown values never approve)
   sanctions jsonb,
@@ -81,6 +81,13 @@ create table linked_banks (
   linked_at timestamptz not null default now()
 );
 create index on linked_banks (user_id);
+
+-- Plaid access tokens: service role only (no RLS policies => invisible to clients).
+create table bank_access_tokens (
+  linked_bank_id uuid primary key references linked_banks(id) on delete cascade,
+  access_token text not null,
+  created_at timestamptz not null default now()
+);
 
 create table direct_deposit_forms (
   id uuid primary key default gen_random_uuid(),
@@ -187,6 +194,7 @@ create table card_authorizations (
   mcc text not null check (mcc ~ '^[0-9]{4}$'),
   merchant text not null,
   foreign_txn boolean not null default false,
+  atm_out_of_network boolean not null default false,
   status text not null check (status in ('authorized','captured','expired','reversed','declined')),
   decline_reason text,
   hold_id uuid references holds(id),

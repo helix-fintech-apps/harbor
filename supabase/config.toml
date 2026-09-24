@@ -1,0 +1,4 @@
+project_id = "harbor"
+
+[functions.api]
+verify_jwt = false   # the function verifies the JWT itself so Stripe webhooks and /fees can be public

@@ -55,6 +55,7 @@ describe("authorizations", () => {
     expect(reason(authorize(req(100), ctx({ card: card({ status: "requested" }) }), P, F))).toBe("card_inactive");
     expect(reason(authorize(req(100), ctx({ ownerKyc: "suspended" }), P, F))).toBe("kyc_not_approved");
     expect(reason(authorize(req(0), ctx(), P, F))).toBe("invalid_amount");
+    expect(reason(authorize(req(100), ctx({ accountStatus: "frozen" }), P, F))).toBe("account_frozen");
   });
   it("foreign transactions add 3% to the hold and must fit the balance", () => {
     const d = authorize(req(10_000, "5411", true), ctx({ availableCents: 10_300 }), P, F);
