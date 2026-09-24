@@ -7,7 +7,7 @@
 #
 #   bash scripts/ci/db_validate.sh          (PG_BIN defaults to /usr/lib/postgresql/16/bin)
 set -euo pipefail
-# shellcheck source=scripts/ci/pg_lib.sh
+# shellcheck source=pg_lib.sh source-path=SCRIPTDIR
 source "$(dirname "$0")/pg_lib.sh"
 
 pg_start

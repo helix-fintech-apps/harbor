@@ -1,0 +1,57 @@
+name: Bug report
+description: Something behaves differently from the spec or the published terms.
+labels: [bug, triage]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Include the transfer / authorization / dispute id or request id if you have one.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Sign in as ava@harbor.test (demo mode)
+        2. Transfers -> Withdraw $100.00, Instant
+        3. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Onboarding / KYC
+        - Accounts / balances / statements
+        - Linked banks / ACH in
+        - Withdrawals / P2P / pocket moves
+        - Debit cards / authorizations
+        - Family cards (spouse / teen)
+        - Disputes
+        - Savings interest
+        - Account closure
+        - Admin / support console
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: env
+    attributes:
+      label: Environment
+      options: [demo mode (local), local Supabase, preview, staging]
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      render: shell

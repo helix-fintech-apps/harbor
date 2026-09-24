@@ -1,0 +1,20 @@
+name: Setup Postgres 16 binaries
+description: >-
+  Make sure the PostgreSQL 16 server binaries exist at /usr/lib/postgresql/16/bin (preinstalled on
+  ubuntu-24.04 runners; installed from apt otherwise). scripts/ci/pg_lib.sh starts a throwaway
+  cluster from them, so no service container or Supabase stack is needed.
+runs:
+  using: composite
+  steps:
+    - name: Ensure PostgreSQL 16
+      shell: bash
+      run: |
+        if [[ -x /usr/lib/postgresql/16/bin/initdb ]]; then
+          echo "PostgreSQL 16 already installed: $(/usr/lib/postgresql/16/bin/postgres --version)"
+        else
+          sudo apt-get update -q
+          sudo apt-get install -y -q postgresql-16
+        fi
+        # The packaged cluster is not used; stop it if the package started one.
+        sudo systemctl stop postgresql 2>/dev/null || true
+        echo "PG_BIN=/usr/lib/postgresql/16/bin" >> "$GITHUB_ENV"

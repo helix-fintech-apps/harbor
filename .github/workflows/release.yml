@@ -1,0 +1,49 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: GitHub release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the release
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # full history + tags for the notes range
+
+      - name: Create release with generated notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          prev="$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)"
+          flags=(--verify-tag --generate-notes --title "$TAG")
+          [[ -n "$prev" ]] && flags+=(--notes-start-tag "$prev")
+          # v1.2.3-rc.1 and friends are prereleases.
+          [[ "$TAG" == *-* ]] && flags+=(--prerelease)
+
+          if [[ -n "$prev" ]]; then
+            migrations="$(git diff --name-only --diff-filter=A "$prev" "$TAG" -- supabase/migrations)"
+          else
+            migrations="$(git ls-tree --name-only -r "$TAG" -- supabase/migrations)"
+          fi
+          {
+            echo "### Database migrations in this release"
+            echo
+            if [[ -z "$migrations" ]]; then
+              echo "_none_"
+            else
+              while IFS= read -r m; do echo "- \`$m\`"; done <<<"$migrations"
+            fi
+          } > "$RUNNER_TEMP/migrations.md"
+
+          gh release create "$TAG" "${flags[@]}" --notes-file "$RUNNER_TEMP/migrations.md"
+          gh release view "$TAG" --json url --jq .url >> "$GITHUB_STEP_SUMMARY"

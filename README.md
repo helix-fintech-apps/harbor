@@ -10,30 +10,38 @@ Business banking is a separate app (app 3), not part of Harbor.
 ## Quick start (demo mode, no backend)
 
 ```bash
-npm install
-npm run dev        # http://localhost:5173 — sign in as a demo user (password Harbor!2026)
-npm test           # domain unit tests + service/API integration tests (Vitest)
+npm ci                          # Node 22 (.nvmrc)
+npm run dev                     # http://localhost:5173 — sign in as a demo user (password Harbor!2026)
+npm run lint && npm run format  # ESLint (no parseFloat/toFixed in money code) + Prettier
 npm run typecheck
+npm test                        # unit + integration (Vitest, in-memory store)
+npm run test:integration:pg     # integration suite also on a throwaway Postgres 16 (SupabaseStore + harbor_* SQL)
+npm run db:check                # migrations + SQL invariants + seed on a throwaway Postgres 16
+npm run test:e2e                # Playwright against a demo-mode build (vite preview)
 npm run build
-npm run db:check   # apply migrations to a throwaway local Postgres 16 and run DB assertions
 ```
 
 Without `VITE_SUPABASE_URL` the UI runs the real service + router in the browser on an in-memory store with
 fake providers (state in localStorage; "Reset demo data" on the sign-in page; demo clock in Admin → jobs).
+CI runs all of the above as separate required checks; see [`docs/CI.md`](docs/CI.md).
 
 ## Layout
 
-| Path                                    | What                                                                                                                                                                                   |
-| --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `supabase/functions/_shared/domain/`    | Pure money rules (integer cents): kyc, limits, accounts, achIn, transfers, cards, family, disputes, interest, closure, statements, ledger, idempotency, config (policy + fee schedule) |
-| `supabase/functions/_shared/providers/` | Provider interfaces + fakes + test-mode real (Stripe Identity, Stripe Issuing, Plaid sandbox); live keys refused                                                                       |
-| `supabase/functions/_shared/app/`       | Service (orchestration), router, stores (Postgres via supabase-js, memory), demo seed                                                                                                  |
-| `supabase/functions/api/`               | Deno Edge Function (service role; JWT auth; Stripe webhook)                                                                                                                            |
-| `supabase/migrations/`                  | Schema, RLS, generated policy/fee seed                                                                                                                                                 |
-| `scripts/ci/`                           | Local Postgres validation (`db_validate.sh`, `auth_stub.sql`, `db_checks.sql`)                                                                                                         |
-| `src/`                                  | Vite + React + Tailwind UI                                                                                                                                                             |
-| `tests/unit`, `tests/integration`       | Vitest                                                                                                                                                                                 |
-| `docs/SPEC.md`, `docs/API.md`           | Spec and endpoint reference                                                                                                                                                            |
+| Path                                      | What                                                                                                                                                                                   |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `supabase/functions/_shared/domain/`      | Pure money rules (integer cents): kyc, limits, accounts, achIn, transfers, cards, family, disputes, interest, closure, statements, ledger, idempotency, config (policy + fee schedule) |
+| `supabase/functions/_shared/providers/`   | Provider interfaces + fakes + test-mode real (Stripe Identity, Stripe Issuing, Plaid sandbox); live keys refused                                                                       |
+| `supabase/functions/_shared/app/`         | Service (orchestration), router, stores (`SupabaseStore`: supabase-js + one `harbor_*` RPC per multi-row money operation; `MemoryStore`: same operations in memory), demo seed         |
+| `supabase/functions/api/`                 | Deno Edge Function (service role; JWT auth; Stripe webhook)                                                                                                                            |
+| `supabase/migrations/`                    | Schema, RLS, generated policy/fee seed, atomic money operations (`harbor_*` functions)                                                                                                 |
+| `supabase/seed.sql`                       | Demo users in `auth.users` + `auth.identities` and their demo-mode state (test only)                                                                                                   |
+| `scripts/ci/`                             | Throwaway Postgres (`pg_lib.sh`, `db_validate.sh`, `with_pg.sh`), `auth_stub.sql`, `db_checks.sql`, `seed_checks.sql`, ruleset + apply script, key guard, coverage summary             |
+| `src/`                                    | Vite + React + Tailwind UI                                                                                                                                                             |
+| `tests/unit`, `tests/integration`         | Vitest (integration runs on the memory store and, with `HARBOR_PG_URL`, on Postgres)                                                                                                   |
+| `e2e/`                                    | Playwright specs against demo mode                                                                                                                                                     |
+| `.github/`                                | CI (lint, typecheck, unit, integration, db, e2e, build), CodeQL, deploy-staging, preview, release, Dependabot, CODEOWNERS, templates                                                   |
+| `docs/SPEC.md`, `docs/API.md`             | Spec and endpoint reference                                                                                                                                                            |
+| `docs/CI.md`, `docs/BRANCH_PROTECTION.md` | Pipeline, required checks, secrets, CodeRabbit, Helix drop-in; branch ruleset                                                                                                          |
 
 ## Deploying to Supabase (when a project is available)
 

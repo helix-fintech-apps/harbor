@@ -4,7 +4,7 @@
 #
 #   bash scripts/ci/with_pg.sh npx vitest run tests/integration
 set -euo pipefail
-# shellcheck source=scripts/ci/pg_lib.sh
+# shellcheck source=pg_lib.sh source-path=SCRIPTDIR
 source "$(dirname "$0")/pg_lib.sh"
 
 pg_start

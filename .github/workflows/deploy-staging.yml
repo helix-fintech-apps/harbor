@@ -1,0 +1,176 @@
+name: Deploy staging
+
+# Every push to main (i.e. every merged PR) ships to staging:
+#   1. Supabase: link project -> db push (migrations) -> seed demo users -> set function secrets
+#      -> deploy `api`
+#   2. Web (Vercel): vercel pull -> vercel build -> vercel deploy --prebuilt
+# There is no Supabase project yet (free-tier project limit), so each half skips with a notice
+# (and a green run) until its secrets exist in the `staging` environment. See docs/CI.md.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Never run two deploys at once, and never cancel one half-way through a migration.
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  SUPABASE_CLI_VERSION: 2.117.0
+
+jobs:
+  supabase:
+    name: Supabase (db push + seed + functions deploy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: staging
+      url: ${{ steps.urls.outputs.api_url }}
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+      STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+      PLAID_CLIENT_ID: ${{ secrets.PLAID_CLIENT_ID }}
+      PLAID_SECRET: ${{ secrets.PLAID_SECRET }}
+      PLAID_ENV: ${{ vars.PLAID_ENV || 'sandbox' }}
+      HARBOR_ALLOWED_ORIGIN: ${{ vars.HARBOR_ALLOWED_ORIGIN }}
+    outputs:
+      deployed: ${{ steps.check.outputs.ok }}
+    steps:
+      - name: Check secrets
+        id: check
+        run: |
+          missing=()
+          for s in SUPABASE_ACCESS_TOKEN SUPABASE_PROJECT_REF SUPABASE_DB_PASSWORD; do
+            [[ -n "${!s}" ]] || missing+=("$s")
+          done
+          if ((${#missing[@]})); then
+            echo "::notice title=Supabase deploy skipped::No Supabase project configured yet (missing in the 'staging' environment: ${missing[*]}). See docs/CI.md."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v7
+        if: steps.check.outputs.ok == 'true'
+      - name: Refuse live Stripe keys and non-sandbox Plaid
+        if: steps.check.outputs.ok == 'true'
+        run: scripts/ci/check-live-keys.sh
+      - uses: supabase/setup-cli@v3
+        if: steps.check.outputs.ok == 'true'
+        with:
+          version: ${{ env.SUPABASE_CLI_VERSION }}
+
+      - name: Link project
+        if: steps.check.outputs.ok == 'true'
+        run: supabase link --project-ref "$SUPABASE_PROJECT_REF" --password "$SUPABASE_DB_PASSWORD"
+      - name: Pending migrations (dry run)
+        if: steps.check.outputs.ok == 'true'
+        run: supabase db push --dry-run --password "$SUPABASE_DB_PASSWORD"
+      - name: Apply migrations (db push)
+        if: steps.check.outputs.ok == 'true'
+        run: supabase db push --password "$SUPABASE_DB_PASSWORD"
+      - name: Seed demo users (idempotent)
+        if: steps.check.outputs.ok == 'true'
+        run: |
+          if [[ -z "$SUPABASE_DB_URL" ]]; then
+            echo "::notice::SUPABASE_DB_URL not set; skipping supabase/seed.sql (demo users)."
+          else
+            psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -q -f supabase/seed.sql
+          fi
+
+      - name: Set Edge Function secrets
+        if: steps.check.outputs.ok == 'true'
+        run: |
+          args=(PLAID_ENV="$PLAID_ENV")
+          [[ -n "$HARBOR_ALLOWED_ORIGIN" ]] && args+=(HARBOR_ALLOWED_ORIGIN="$HARBOR_ALLOWED_ORIGIN")
+          if [[ -n "$STRIPE_SECRET_KEY" ]]; then
+            args+=(STRIPE_SECRET_KEY="$STRIPE_SECRET_KEY" STRIPE_WEBHOOK_SECRET="$STRIPE_WEBHOOK_SECRET")
+          else
+            echo "::notice::STRIPE_SECRET_KEY not set; staging uses the fake identity vendor and card issuer."
+          fi
+          if [[ -n "$PLAID_CLIENT_ID" && -n "$PLAID_SECRET" ]]; then
+            args+=(PLAID_CLIENT_ID="$PLAID_CLIENT_ID" PLAID_SECRET="$PLAID_SECRET")
+          else
+            echo "::notice::PLAID_CLIENT_ID / PLAID_SECRET not set; staging uses the fake bank link."
+          fi
+          supabase secrets set --project-ref "$SUPABASE_PROJECT_REF" "${args[@]}"
+      - name: Deploy Edge Function `api`
+        if: steps.check.outputs.ok == 'true'
+        run: supabase functions deploy api --project-ref "$SUPABASE_PROJECT_REF"
+
+      - name: Summary
+        id: urls
+        if: steps.check.outputs.ok == 'true'
+        run: |
+          api="https://${SUPABASE_PROJECT_REF}.supabase.co/functions/v1/api"
+          echo "api_url=$api" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Supabase staging"
+            echo "- Migrations pushed to \`${SUPABASE_PROJECT_REF}\`"
+            echo "- Edge Function \`api\` deployed: $api"
+            echo "- Commit: \`${GITHUB_SHA::7}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  web:
+    name: Vercel (staging)
+    needs: supabase # schema + API first, then the UI that depends on them
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: staging
+      url: ${{ steps.deploy.outputs.url }}
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      # Optional: custom staging domain to alias the deployment to (repo/env variable).
+      STAGING_DOMAIN: ${{ vars.STAGING_DOMAIN }}
+    steps:
+      - name: Check secrets
+        id: check
+        run: |
+          missing=()
+          for s in VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID; do
+            [[ -n "${!s}" ]] || missing+=("$s")
+          done
+          if ((${#missing[@]})); then
+            echo "::notice title=Vercel deploy skipped::Missing secrets in the 'staging' environment: ${missing[*]}. See docs/CI.md."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v7
+        if: steps.check.outputs.ok == 'true'
+      - uses: ./.github/actions/setup-node-deps
+        if: steps.check.outputs.ok == 'true'
+
+      # Without a deployed Supabase project the UI is built in demo mode (the Vercel project has no
+      # VITE_SUPABASE_URL), which is still a useful staging target for Helix.
+      - name: vercel pull (preview env settings)
+        if: steps.check.outputs.ok == 'true'
+        run: npx --yes vercel@latest pull --yes --environment=preview --token="$VERCEL_TOKEN"
+      - name: vercel build
+        if: steps.check.outputs.ok == 'true'
+        run: npx --yes vercel@latest build --token="$VERCEL_TOKEN"
+      - name: vercel deploy
+        id: deploy
+        if: steps.check.outputs.ok == 'true'
+        run: |
+          url="$(npx --yes vercel@latest deploy --prebuilt --token="$VERCEL_TOKEN" \
+            --meta githubCommitSha="$GITHUB_SHA" --meta environment=staging)"
+          if [[ -n "$STAGING_DOMAIN" ]]; then
+            npx --yes vercel@latest alias set "$url" "$STAGING_DOMAIN" --token="$VERCEL_TOKEN"
+            url="https://$STAGING_DOMAIN"
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "### Vercel staging: $url" >> "$GITHUB_STEP_SUMMARY"

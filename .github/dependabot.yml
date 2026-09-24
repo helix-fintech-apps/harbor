@@ -1,0 +1,46 @@
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: America/Los_Angeles
+    open-pull-requests-limit: 10
+    labels: [dependencies]
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(dev-deps)"
+    ignore:
+      # Pinned to the preinstalled Chromium build used by local/Helix runners
+      # (/opt/pw-browsers/chromium-1194). Bump deliberately, together with that browser.
+      - dependency-name: "@playwright/test"
+    groups:
+      # vitest and @vitest/coverage-v8 must stay on exactly the same version.
+      vitest:
+        patterns: ["vitest", "@vitest/*"]
+      # Tooling moves together; one PR a week.
+      dev-tooling:
+        dependency-type: development
+        update-types: [minor, patch]
+      # Runtime deps (react, supabase-js, ...) grouped for minor/patch.
+      runtime:
+        dependency-type: production
+        update-types: [minor, patch]
+    # Majors arrive as individual PRs so they get individual review.
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: America/Los_Angeles
+    labels: [dependencies, ci]
+    commit-message:
+      prefix: "ci(deps)"
+    groups:
+      github-actions:
+        patterns: ["*"]

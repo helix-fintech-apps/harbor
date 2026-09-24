@@ -1,0 +1,148 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# CodeRabbit AI review config for Harbor (consumer neobank). Installed as the CodeRabbit GitHub
+# App (see docs/CI.md). CodeRabbit is an advisory reviewer: it is NOT a required check and never
+# replaces the human CODEOWNERS approval on money code.
+language: en-US
+early_access: false
+
+tone_instructions: >-
+  Be direct and specific. This is a bank: prioritise money correctness (balances, holds, fees,
+  ledger), authorization and data integrity over style nits. Quote the rule from docs/SPEC.md.
+
+reviews:
+  profile: assertive
+  request_changes_workflow: true
+  high_level_summary: true
+  review_status: true
+  collapse_walkthrough: false
+  sequence_diagrams: true
+  poem: false
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches: ["main"]
+    ignore_title_keywords: ["WIP", "[skip review]"]
+  path_filters:
+    - "!**/package-lock.json"
+    - "!dist/**"
+    - "!coverage/**"
+    - "!playwright-report/**"
+    - "!test-results/**"
+    - "!supabase/.temp/**"
+  path_instructions:
+    - path: "supabase/functions/**"
+      instructions: |
+        This is the money path of a consumer bank. Review every change against docs/SPEC.md for:
+        - Integer cents only (micro-cents for interest accrual). Flag parseFloat, toFixed, `/ 100`
+          on cents, Number division without explicit rounding, and any rounding other than the
+          documented rules (half-up for bps fees, half-to-even for monthly interest).
+        - Holds vs posted. posted = ledger (credits - debits); available = posted - ACTIVE holds
+          (expired card holds stop counting). Debits, withdrawals, P2P and card authorizations are
+          checked against AVAILABLE, never posted. Every hold must be released exactly once
+          (settlement, return, capture, expiry). A card hold is amount + fees.
+        - ACH settlement and returns. Pulls credit immediately with a hold for 3 business days
+          (weekends + listed holidays skipped). Only the listed return codes reverse; a transfer
+          is returned at most once; before settlement the hold kept the money unavailable, after
+          settlement the claw-back may make the balance negative (and must block closure).
+          72h cooling-off before withdrawing to a newly linked bank; owner name must match.
+        - Card auth / capture tolerance. Check order is fixed (see cards.ts). Capture only an
+          unexpired `authorized` auth, once. Partial capture releases the remainder; over-capture
+          only within tolerance (restaurants MCC 5812-5814 +20%, fuel 5541/5542 up to $175,
+          otherwise 0%). FX fee is recomputed on capture and not refunded on merchant refund.
+          Refunds post once per network refund id and never exceed captured - refunded.
+        - Fee schedule = published fees. Fees come from the active FeeSchedule (`fee_schedules`,
+          rendered on /fees); never hardcode a fee. Instant fee = 1.5% half-up clamped to
+          [$0.25, $15.00]; amount + fee <= available. Transfers store fee_version/policy_version.
+        - Interest rounding. Daily accrual = floor(balance x APY bps x 10^6 / (10,000 x 365)) micro-
+          cents on end-of-day posted savings (<= 0 accrues nothing); monthly posting rounds
+          accrued + carry-in half-to-even; |carry| <= 1/2 cent; once per account + period.
+        - Reg E dispute timelines. 60-day window after posting; provisional credit due within 10
+          business days of notice; decision within 45 days (90 if the account is < 30 days old);
+          lost reverses the provisional credit; one open dispute per transaction.
+        - Idempotency. Mutating endpoints honour Idempotency-Key (replay = first response, other
+          body = 422 idempotency_conflict); ledger posts are idempotent per business key; Stripe
+          webhooks dedupe on the event id (`provider_events`). Flag anything that could
+          double-debit, double-credit, double-refund or double-post interest on retry.
+        - Ledger balance and atomicity. Every money event posts ONE balanced txn (debits ==
+          credits); the ledger is append-only. A money operation that writes more than one row
+          must go through its atomic operation (`MoneyOps` in _shared/app/store.ts -> one
+          harbor_* SQL function), never sequential store.insert/update calls. Flag guards that are
+          checked in TypeScript but not re-checked inside the operation (state compare-and-set,
+          available balance, limits, refund bounds, closure preconditions).
+        - Authorization and KYC. Only `approved` customers move money; `frozen_legal` blocks every
+          payout; staff can't approve unverified customers; writes happen only in the `api`
+          function with the service role after verifying the JWT. Never trust client-supplied
+          amounts, fees, user ids or roles.
+        - Providers. Refuse sk_live_/rk_live_ keys and any PLAID_ENV other than sandbox; fakes stay
+          deterministic.
+    - path: "supabase/functions/_shared/domain/**"
+      instructions: |
+        Pure money rules (no I/O). Require a unit test in tests/unit for every behaviour change,
+        with boundary cases: exactly 72h cooling-off, inclusive tier-limit boundaries (UTC day /
+        UTC month), business days across weekends and holidays, fee min/max clamps and half-up
+        cents, over-capture tolerance edges, auth expiry instant, 60-day dispute window, 30-day
+        new-account threshold, half-cent interest carry, negative balances. No floats.
+    - path: "supabase/functions/_shared/app/store.ts"
+      instructions: |
+        MemoryStore and SupabaseStore must implement every MoneyOps operation with the SAME guards
+        and error codes (tests and demo mode run on MemoryStore; production on Postgres). A change
+        to a harbor_* SQL function needs the matching MemoryStore change and a test in
+        tests/integration/atomic-ops.test.ts (runs on both stores). MemoryStore operations must
+        stay synchronous inside tx() so they can't interleave and roll back completely.
+    - path: "supabase/migrations/**"
+      instructions: |
+        Migrations are append-only: flag edits to already-merged files. Money columns are bigint
+        cents (never numeric/real/double/money). New tables enable row level security with explicit
+        policies and no client write grants. Keep the ledger_balanced deferred trigger, the
+        append-only triggers, refund_le_captured, disputes_one_open_per_auth and
+        accounts_one_live_per_kind intact. harbor_* functions: security definer with
+        `set search_path`, execute revoked from public/anon/authenticated, row locks (`for update`)
+        before re-checking balances/state, idempotent for their business key, raise
+        `harbor:<code>`. New invariants belong in scripts/ci/db_checks.sql.
+    - path: "supabase/seed.sql"
+      instructions: |
+        Test-only demo data. Must stay idempotent, mirror DEMO_USERS in _shared/app/demo.ts (the
+        unit test tests/unit/demo-seed.test.ts checks it), use the documented demo password, grant
+        staff roles only by update after signup, and create money only through harbor_* operations.
+        Never real personal data or live keys.
+    - path: "src/**"
+      instructions: |
+        The UI never computes money rules itself: balances, holds and fees come from the API or the
+        shared @domain helpers (fee quotes from the published fee schedule). Show posted vs
+        available vs on-hold distinctly. Format cents only at render time (formatCents), keep
+        data-cents on <Money>. Controls used by tests need data-testid. Never use the service role
+        key in the browser.
+    - path: "{tests,e2e}/**"
+      instructions: |
+        Assert exact integer cents (data-cents in e2e), not approximate or formatted values. Prefer
+        table-driven boundary cases. Flag skipped or `.only` tests. Integration tests that touch
+        money should run on both stores (tests/integration/support/harness.ts).
+    - path: ".github/**"
+      instructions: |
+        Workflows must use least-privilege `permissions:`, pinned action versions, and must not
+        expose secrets to `pull_request_target` or fork PRs. Required check job names (lint,
+        typecheck, unit, integration, db, e2e, build) must not be renamed without updating
+        scripts/ci/ruleset-main.json and docs/BRANCH_PROTECTION.md. Deploys must skip (green, with a
+        notice) when their secrets are missing and must refuse live payment keys.
+  tools:
+    eslint:
+      enabled: true
+    shellcheck:
+      enabled: true
+    actionlint:
+      enabled: true
+    gitleaks:
+      enabled: true
+    markdownlint:
+      enabled: true
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  learnings:
+    scope: local
+  issues:
+    scope: local
+  pull_requests:
+    scope: local

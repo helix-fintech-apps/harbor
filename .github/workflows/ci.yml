@@ -1,0 +1,169 @@
+name: CI
+
+# Every job below is its own required status check on `main` (see docs/BRANCH_PROTECTION.md).
+# Job ids == check names: lint, typecheck, unit, integration, db, e2e, build. Do not rename them
+# without updating the ruleset, or merges will block on a check that never reports.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+# One run per PR/branch. Superseded PR runs are cancelled; runs on main are not, so
+# every commit that lands on main gets a complete, auditable result.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  FORCE_COLOR: "1"
+  # CI never talks to Stripe or Plaid: fake identity / bank link / issuer only.
+  HARBOR_FORCE_FAKE: "1"
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-deps
+      - name: ESLint (money rule - no parseFloat / toFixed in supabase/functions)
+        run: npm run lint
+      - name: Prettier
+        run: npm run format
+
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-deps
+      - name: tsc (app, domain, service, tests, e2e)
+        run: npm run typecheck
+      - name: Setup Deno (Edge Functions)
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: deno check (Edge Function `api`)
+        run: deno check supabase/functions/api/index.ts
+
+  unit:
+    name: unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-deps
+      - name: Vitest (tests/unit) with coverage of the money domain
+        run: >-
+          npx vitest run tests/unit
+          --coverage.enabled
+          --coverage.include='supabase/functions/_shared/domain/**'
+          --coverage.reporter=text
+          --coverage.reporter=json-summary
+          --coverage.reporter=lcov
+          --coverage.reportsDirectory=coverage
+      - name: Coverage summary
+        if: always() && hashFiles('coverage/coverage-summary.json') != ''
+        run: node scripts/ci/coverage-summary.mjs coverage/coverage-summary.json >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-unit
+          path: coverage/
+          retention-days: 14
+          if-no-files-found: warn
+
+  integration:
+    name: integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-deps
+      - uses: ./.github/actions/setup-postgres
+      # The service + router through every flow, on the in-memory store AND on Postgres
+      # (SupabaseStore -> harbor_* SQL functions), incl. races, rollback and replay.
+      - name: Vitest (tests/integration) on memory + throwaway Postgres 16
+        run: npm run test:integration:pg
+
+  db:
+    name: db
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-postgres
+      # Migrations from scratch on an empty database + scripts/ci/db_checks.sql (constraints,
+      # ledger balance, RLS, every harbor_* money operation), then supabase/seed.sql twice +
+      # scripts/ci/seed_checks.sql.
+      - name: Migrations, SQL invariants and seed (scripts/ci/db_validate.sh)
+        run: bash scripts/ci/db_validate.sh
+
+  e2e:
+    name: e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-deps
+      - name: Resolve Playwright version
+        id: pw
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}-chromium
+      - name: Install Playwright Chromium + OS deps
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+      - name: Install Playwright OS deps (browser cached)
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+      # Demo mode: playwright.config.ts builds with empty VITE_SUPABASE_* and serves it with
+      # `vite preview`; the service runs in the browser with fake providers (no backend).
+      - name: Playwright
+        run: npx playwright test
+        env:
+          CI: "true"
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Placeholders: the live-mode bundle must build without real credentials. Real values are
+      # injected by the hosting provider at deploy time (demo mode is built by the e2e job).
+      VITE_SUPABASE_URL: http://127.0.0.1:54321
+      VITE_SUPABASE_ANON_KEY: ci-placeholder-anon-key
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-deps
+      - name: tsc -b && vite build
+        run: npm run build
+      - name: Upload dist
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7

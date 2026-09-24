@@ -1,0 +1,25 @@
+# CODEOWNERS for Harbor. Later rules win. Review from a code owner is required on `main`
+# (see docs/BRANCH_PROTECTION.md).
+
+# Default owner
+*                                   @nizamali1-coder
+
+# Money core: domain rules, service/stores, providers, API, schema, seed and their tests.
+/supabase/functions/                @nizamali1-coder
+/supabase/functions/_shared/domain/ @nizamali1-coder
+/supabase/functions/_shared/app/    @nizamali1-coder
+/supabase/migrations/               @nizamali1-coder
+/supabase/seed.sql                  @nizamali1-coder
+/tests/unit/                        @nizamali1-coder
+/tests/integration/                 @nizamali1-coder
+/e2e/                               @nizamali1-coder
+
+# Published terms page (must equal the fee schedule / policy).
+/src/pages/Fees.tsx                 @nizamali1-coder
+
+# CI/CD, release and repository policy.
+/.github/                           @nizamali1-coder
+/scripts/ci/                        @nizamali1-coder
+/.coderabbit.yaml                   @nizamali1-coder
+/docs/CI.md                         @nizamali1-coder
+/docs/BRANCH_PROTECTION.md          @nizamali1-coder

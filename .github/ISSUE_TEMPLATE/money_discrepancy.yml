@@ -1,0 +1,58 @@
+name: Money discrepancy
+description: A balance, hold, fee, interest amount, refund, dispute credit or ledger entry is wrong.
+title: "[money] "
+labels: [bug, money, priority-high]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Money bugs are triaged first. Give exact integer cents and the ids involved.
+        Never paste real account or card numbers, or live Stripe / Plaid keys.
+  - type: input
+    id: ids
+    attributes:
+      label: Account / transfer / authorization / dispute id(s)
+    validations:
+      required: true
+  - type: textarea
+    id: amounts
+    attributes:
+      label: Expected vs actual (in cents)
+      placeholder: |
+        Instant withdrawal of 10000 cents
+        expected fee: 150 (1.5%, min 25, max 1500 per the fee page)
+        actual fee:   151
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      multiple: true
+      options:
+        - Posted vs available balance / holds
+        - ACH deposit hold / settlement
+        - ACH return / claw-back
+        - Withdrawal fee (standard / instant)
+        - P2P / pocket move
+        - Card authorization / capture / expiry
+        - Merchant refund
+        - Family card / allowance
+        - Dispute / provisional credit (Reg E)
+        - Savings interest accrual / posting
+        - Tier limits
+        - Account closure payout
+        - Statement
+        - Ledger imbalance
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Policy / fee schedule version
+      placeholder: "policy 1, fees 1"
+  - type: textarea
+    id: rule
+    attributes:
+      label: Which published rule is violated?
+      description: Quote the Fees & terms page (/fees) or docs/SPEC.md.

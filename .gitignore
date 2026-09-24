@@ -9,3 +9,4 @@ test-results
 supabase/.temp
 .pgdata
 coverage
+deno.lock

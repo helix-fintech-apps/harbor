@@ -1,0 +1,94 @@
+name: Preview
+
+# Vercel preview deployment for every PR, with a single sticky comment holding the URL.
+# Uses `pull_request` (not `pull_request_target`): PRs from forks and Dependabot get no
+# secrets, so they skip with a notice instead of running untrusted code with a token.
+# Until the Vercel project exists the job skips (green) with a notice.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Vercel preview
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+    environment:
+      name: preview
+      url: ${{ steps.deploy.outputs.url }}
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+    steps:
+      - name: Check secrets
+        id: check
+        run: |
+          if [[ -z "$VERCEL_TOKEN" || -z "$VERCEL_ORG_ID" || -z "$VERCEL_PROJECT_ID" ]]; then
+            echo "::notice title=Preview skipped::VERCEL_TOKEN / VERCEL_ORG_ID / VERCEL_PROJECT_ID are not available (not configured yet, or PR from a fork/Dependabot). See docs/CI.md."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v7
+        if: steps.check.outputs.ok == 'true'
+      - uses: ./.github/actions/setup-node-deps
+        if: steps.check.outputs.ok == 'true'
+
+      - name: vercel pull
+        if: steps.check.outputs.ok == 'true'
+        run: npx --yes vercel@latest pull --yes --environment=preview --token="$VERCEL_TOKEN"
+      - name: vercel build
+        if: steps.check.outputs.ok == 'true'
+        run: npx --yes vercel@latest build --token="$VERCEL_TOKEN"
+      - name: vercel deploy
+        id: deploy
+        if: steps.check.outputs.ok == 'true'
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          url="$(npx --yes vercel@latest deploy --prebuilt --token="$VERCEL_TOKEN" \
+            --meta githubCommitSha="$HEAD_SHA" --meta githubPrId="$PR_NUMBER")"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Comment preview URL
+        if: steps.check.outputs.ok == 'true'
+        uses: actions/github-script@v9
+        env:
+          PREVIEW_URL: ${{ steps.deploy.outputs.url }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        with:
+          script: |
+            const marker = "<!-- harbor-preview -->";
+            const body = [
+              marker,
+              "### Vercel preview",
+              "",
+              `| Commit | URL |`,
+              `| --- | --- |`,
+              `| \`${process.env.HEAD_SHA.slice(0, 7)}\` | ${process.env.PREVIEW_URL} |`,
+              "",
+              "_Without `VITE_SUPABASE_URL` in the Vercel `preview` environment the preview runs Harbor in **demo mode** (fake providers, in-browser ledger). Stripe/Plaid run in **test/sandbox mode** only._",
+            ].join("\n");
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number, per_page: 100 });
+            const existing = comments.find((c) => c.body?.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
