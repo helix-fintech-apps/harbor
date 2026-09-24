@@ -1,7 +1,10 @@
-# Harbor — build spec (shared by all agents)
+# Harbor — consumer neobank: build spec (shared by all agents)
 
-Consumer neobank used as a Helix test subject (app 2; app 1 is TaskNest). Money correctness is the point:
+Harbor is a **consumer neobank**: personal checking and savings, debit cards, and family cards (spouse and teen).
+It is a Helix test subject (app 2; app 1 is TaskNest). Money correctness is the point:
 every rule below is written down here, in the published terms page (`/fees`), and in code + tests.
+
+Business banking is a separate app (app 3); Harbor has no business accounts.
 
 ## Ground rules
 - Money = integer cents (`bigint` in SQL). Interest accrual uses integer **micro-cents** (1 cent = 1,000,000). Never floats.

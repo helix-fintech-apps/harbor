@@ -1,8 +1,11 @@
-# Harbor
+# Harbor — consumer neobank
 
-A small neobank (checking + savings, ACH, P2P, debit and family cards, disputes, savings interest) built as a
-**test subject for Helix**, a fintech QA product. Money correctness is the point: every rule is in
+Harbor is a **consumer neobank**: personal checking and savings, debit cards, and family cards (spouse and teen),
+with ACH in/out, P2P, disputes and savings interest. It is built as a **test subject for Helix**, a fintech QA
+product (app 2; app 1 is TaskNest). Money correctness is the point: every rule is in
 [`docs/SPEC.md`](docs/SPEC.md), on the published terms page (`/fees`), and in code and tests.
+
+Business banking is a separate app (app 3), not part of Harbor.
 
 ## Quick start (demo mode, no backend)
 ```bash
