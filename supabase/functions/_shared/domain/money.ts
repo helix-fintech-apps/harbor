@@ -49,6 +49,12 @@ export function formatCents(c: Cents, currency = "USD"): string {
   return new Intl.NumberFormat("en-US", { style: "currency", currency }).format(c / 100);
 }
 
+/** Basis points as a percentage: 400 -> "4%", 150 -> "1.50%", 5 -> "0.05%". Integer math only. */
 export function formatBps(bps: number): string {
-  return `${(bps / 100).toFixed(bps % 100 === 0 ? 0 : 2)}%`;
+  if (!Number.isSafeInteger(bps)) throw new Error(`bps must be an integer, got ${bps}`);
+  const sign = bps < 0 ? "-" : "";
+  const abs = Math.abs(bps);
+  const whole = Math.floor(abs / 100);
+  const frac = abs % 100;
+  return frac === 0 ? `${sign}${whole}%` : `${sign}${whole}.${String(frac).padStart(2, "0")}%`;
 }

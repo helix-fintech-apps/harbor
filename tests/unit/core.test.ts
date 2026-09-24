@@ -1,5 +1,5 @@
 import {
-  DEFAULT_POLICY as P, DEFAULT_FEES as F, divRoundHalfUp, divRoundHalfEven, applyBps, assertCents,
+  DEFAULT_POLICY as P, DEFAULT_FEES as F, divRoundHalfUp, divRoundHalfEven, applyBps, assertCents, formatBps,
   addBusinessDays, txn, dr, cr, assertBalanced, partyBalance, trialBalance,
   mapIdentityStatus, decideKyc, screenSanctions, canTransitionKyc, transitionKyc, canMoveMoney, canPayout, withVendorTimeout,
   checkLimit, usage, abaChecksumValid, HARBOR_ROUTING_NUMBER, fakeAccountNumber, maskAccountNumber, balances,
@@ -18,6 +18,10 @@ describe("money helpers", () => {
     expect(divRoundHalfEven(2_500_000n, 1_000_000n)).toBe(2n);
     expect(divRoundHalfEven(2_500_001n, 1_000_000n)).toBe(3n);
     expect(divRoundHalfEven(-2_500_000n, 1_000_000n)).toBe(-2n);
+  });
+  it("formats basis points as the published percentages without floats", () => {
+    expect([400, 150, 300, 2_000, 5, 0, -150].map(formatBps)).toEqual(["4%", "1.50%", "3%", "20%", "0.05%", "0%", "-1.50%"]);
+    expect(() => formatBps(1.5)).toThrow();
   });
   it("applies basis points and rejects floats", () => {
     expect(applyBps(10_000, 150)).toBe(150);

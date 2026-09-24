@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { call, type ApiResult } from "../api";
+import { formatCents } from "@domain";
 import { Badge, Money, Result, Section, dollarsToCents, useApi } from "../components/ui";
 
 export default function Disputes() {
@@ -15,7 +16,7 @@ export default function Disputes() {
         <div className="grid gap-2 md:grid-cols-4">
           <select className="input" value={form.authId} onChange={(e) => setForm({ ...form, authId: e.target.value })} data-testid="dispute-auth">
             <option value="">Transaction…</option>
-            {posted.map((a: any) => <option key={a.id} value={a.id}>{a.merchant} — {((a.captured_cents - a.refunded_cents) / 100).toFixed(2)}</option>)}
+            {posted.map((a: any) => <option key={a.id} value={a.id}>{a.merchant} — {formatCents(a.captured_cents - a.refunded_cents)}</option>)}
           </select>
           <input className="input" placeholder="Amount $" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} data-testid="dispute-amount" />
           <input className="input" placeholder="What went wrong?" value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} data-testid="dispute-reason" />

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { call, type ApiResult } from "../api";
 import { Badge, Money, Result, Section, dollarsToCents, useApi } from "../components/ui";
-import { MCC_GROUPS } from "@domain";
+import { MCC_GROUPS, formatCents } from "@domain";
 
 const blankLimits = { perTxn: "50.00", daily: "100.00", monthly: "400.00" };
 
@@ -107,7 +107,7 @@ export default function Cards() {
         <div className="mt-3 grid gap-2 md:grid-cols-4">
           <select className="input" value={capture.authId} onChange={(e) => setCapture({ ...capture, authId: e.target.value })} data-testid="sim-auth">
             <option value="">Authorization…</option>
-            {me.authorizations.filter((a: any) => a.status === "authorized" || a.status === "captured").map((a: any) => <option key={a.id} value={a.id}>{a.merchant} {(a.amount_cents / 100).toFixed(2)} ({a.status})</option>)}
+            {me.authorizations.filter((a: any) => a.status === "authorized" || a.status === "captured").map((a: any) => <option key={a.id} value={a.id}>{a.merchant} {formatCents(a.status === "captured" ? a.captured_cents : a.amount_cents)} ({a.status})</option>)}
           </select>
           <input className="input" placeholder="Amount $" value={capture.amount} onChange={(e) => setCapture({ ...capture, amount: e.target.value })} data-testid="sim-capture-amount" />
           <button className="btn-outline" data-testid="sim-capture" onClick={async () => { setSimRes(await call("POST", `/sim/authorizations/${capture.authId}/capture`, { amountCents: dollarsToCents(capture.amount) })); reload(); }}>Capture</button>

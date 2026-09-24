@@ -1,0 +1,19 @@
+# Build and test output
+dist/
+coverage/
+playwright-report/
+test-results/
+*.tsbuildinfo
+
+# Dependencies and lockfiles
+node_modules/
+package-lock.json
+
+# Supabase CLI state; SQL is formatted by hand (Prettier has no SQL parser)
+supabase/.temp/
+supabase/.branches/
+supabase/migrations/
+**/*.sql
+
+# Vercel
+.vercel/

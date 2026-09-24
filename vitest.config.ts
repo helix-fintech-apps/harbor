@@ -7,5 +7,11 @@ export default defineConfig({
     // With HARBOR_PG_URL every integration file truncates and reseeds the same database, so the
     // files must not run in parallel against it.
     fileParallelism: !process.env.HARBOR_PG_URL,
+    coverage: {
+      provider: "v8",
+      include: ["supabase/functions/_shared/**/*.ts"],
+      reporter: ["text", "json-summary", "lcov"],
+      reportsDirectory: "coverage",
+    },
   },
 });
