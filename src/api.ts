@@ -3,7 +3,7 @@
 //  - demo:  the same service + router running in the browser on an in-memory store with fake
 //           providers, persisted to localStorage (no backend needed; default for local dev / Helix runs).
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { createMemoryApp, seedDemo, DEMO_USERS, type MemoryApp } from "@shared/app/demo.ts";
+import { createMemoryApp, seedDemo, DEMO_PASSWORD, DEMO_USERS, type MemoryApp } from "@shared/app/demo.ts";
 
 export type Role = "customer" | "admin" | "support_agent";
 export interface Session { userId: string; email: string; role: Role }
@@ -15,7 +15,7 @@ const supabase: SupabaseClient | null = LIVE ? createClient(import.meta.env.VITE
 
 const DEMO_KEY = "harbor-demo-v1";
 const SESSION_KEY = "harbor-session";
-export const DEMO_PASSWORD = "Harbor!2026";
+export { DEMO_PASSWORD };
 let demo: Promise<MemoryApp> | null = null;
 
 function safeGet(k: string) { try { return localStorage.getItem(k); } catch { return null; } }

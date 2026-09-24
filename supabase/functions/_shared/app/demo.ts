@@ -45,6 +45,9 @@ export function createMemoryApp(start = new Date(), opts: { kycTimeoutMs?: numbe
   return createApp(new MemoryStore(() => clock.now()), clock, opts);
 }
 
+/** Password of every demo user (demo mode and supabase/seed.sql). Test only. */
+export const DEMO_PASSWORD = "Harbor!2026";
+
 export const DEMO_USERS = [
   { id: "00000000-0000-4000-8000-00000000a0a0", email: "ava@harbor.test", legalName: "Ava Harbor", role: "customer" as const },
   { id: "00000000-0000-4000-8000-00000000b0b0", email: "ben@harbor.test", legalName: "Ben Rivers", role: "customer" as const },

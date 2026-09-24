@@ -37,7 +37,9 @@ pg_start() {
 }
 
 pg_psql() {
-  "${PG_RUN[@]}" "$PG_BIN/psql" -h "$PG_TMP" -p "$PG_PORT" -U postgres -v ON_ERROR_STOP=1 -q "$@"
+  # NOTICEs are noise here (e.g. "extension pgcrypto already exists", as on Supabase); warnings still show.
+  PGOPTIONS="-c client_min_messages=warning" \
+    "${PG_RUN[@]}" "$PG_BIN/psql" -h "$PG_TMP" -p "$PG_PORT" -U postgres -v ON_ERROR_STOP=1 -q "$@"
 }
 
 pg_create_migrated() {

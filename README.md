@@ -34,7 +34,8 @@ fake providers (state in localStorage; "Reset demo data" on the sign-in page; de
 
 ## Deploying to Supabase (when a project is available)
 1. `supabase link --project-ref <ref>` then `supabase db push` (migrations).
-2. Create demo users in Auth (see SPEC) and set staff roles: `update profiles set role='admin' where email='admin@harbor.test'`.
+2. Seed the demo users (same people, ids and balances as demo mode; password `Harbor!2026`, staff roles, KYC states):
+   `psql "$SUPABASE_DB_URL" -f supabase/seed.sql` (idempotent). Locally, `supabase db reset` applies migrations + seed.
 3. `supabase secrets set` for the variables in `.env.example` (test keys only), then `supabase functions deploy api`.
 4. Build the UI with `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY`.
 

@@ -109,9 +109,12 @@ operations) are validated against a local Postgres 16 with a stub `auth` schema:
 `scripts/ci/db_checks.sql`, which also exercises every `harbor_*` operation: replay, guards, rollback, privileges).
 `npm run test:integration:pg` runs the integration suite on that Postgres too (real service + `SupabaseStore` + the SQL functions,
 through a small supabase-js stand-in over node-postgres), so both stores are held to the same behaviour.
-Demo users (in-browser demo mode; create the same users in Supabase Auth when a project exists): `ava@harbor.test` (approved, $2,500),
-`ben@harbor.test` (approved, $500), `rita@harbor.test` (needs_review), `oleg@harbor.test` (frozen_legal, sanctions), `nia@harbor.test` (unverified),
-`admin@harbor.test`, `agent@harbor.test` (support). Password: `Harbor!2026` (test only).
+Demo users (in-browser demo mode, and `supabase/seed.sql` for a real project: same ids, KYC states, balances, bank and card):
+`ava@harbor.test` (approved, $2,500), `ben@harbor.test` (approved, $500), `rita@harbor.test` (needs_review),
+`oleg@harbor.test` (frozen_legal, sanctions), `nia@harbor.test` (unverified), `admin@harbor.test`, `agent@harbor.test` (support).
+Password: `Harbor!2026` (test only). The seed writes `auth.users` + `auth.identities` directly (bcrypt via `crypt()`/`gen_salt('bf')`),
+grants staff roles by update after signup, and creates money through the `harbor_*` operations; `npm run db:check` applies it twice
+to a fresh database and checks it (`scripts/ci/seed_checks.sql`), and a unit test keeps it in sync with `DEMO_USERS`.
 
 ## API
 See `docs/API.md`. Edge Function `api`; errors are `{error: {code, message, details?}}` with 4xx.
