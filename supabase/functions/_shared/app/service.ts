@@ -15,10 +15,10 @@ import {
   closureBlocks, planClosure,
   buildStatement, periodBounds,
   withIdempotency, IdempotencyConflict, type IdemStore, type UsageEvent, type Line, type LedgerAccount,
-  isoDate, addHours, addBusinessDays, checkLimit,
+  isoDate, addHours, addBusinessDays, checkLimit, limitWindow,
 } from "../domain/index.ts";
 import type { Providers } from "../providers/index.ts";
-import { uuid, type Row, type Store } from "./store.ts";
+import { MoneyOpError, uuid, type Row, type Store } from "./store.ts";
 
 export class ApiError extends Error {
   constructor(public status: number, public code: string, message?: string, public details?: unknown) { super(message ?? code); }
@@ -76,6 +76,24 @@ export class HarborService {
   }
   requireAdmin(c: Caller) {
     if (c.role !== "admin") throw new ApiError(403, "forbidden", "admin only");
+  }
+
+  /** Transfers store the client's Idempotency-Key namespaced by user (unique per user, not globally). */
+  transferIdemKey(c: Caller, key?: string): string | null {
+    return key ? `${c.userId}:${key}` : null;
+  }
+
+  /**
+   * An atomic money operation refused to write because a guard failed under its row locks (the
+   * state changed after this request planned it). Map it onto the endpoint's error contract.
+   * Payload/ledger mismatches are server bugs and stay 500s.
+   */
+  opFailed(e: unknown, contract?: { status: number; code: string }): never {
+    if (!(e instanceof MoneyOpError) || e.code === "payload_mismatch" || e.code === "unbalanced_ledger") throw e;
+    if (e.code === "insufficient_funds" || e.code === "daily_limit" || e.code === "monthly_limit") throw new ApiError(422, e.code, e.message);
+    if (e.code === "not_found") throw new ApiError(404, "not_found", e.message);
+    if (contract) throw new ApiError(contract.status, contract.code, e.message);
+    throw new ApiError(409, e.code, e.message);
   }
 
   async pockets(userId: string): Promise<Row[]> {
@@ -349,13 +367,19 @@ export class HarborService {
     let plan;
     try { plan = planAchPull({ transferId: id, accountId: chk.id, amountCents: body.amountCents, bank, now: this.now() }, this.policy); }
     catch (e) { throw new ApiError(422, /name/.test((e as Error).message) ? "bank_name_mismatch" : "invalid_request", (e as Error).message); }
-    await this.store.insert("transfers", {
-      id, user_id: c.userId, kind: "ach_in", speed: null, to_account_id: chk.id, from_account_id: null, linked_bank_id: bank.id, counterparty_user_id: null,
-      amount_cents: body.amountCents, fee_cents: 0, status: "pending", settle_at: plan.settleAt.toISOString(), return_code: null, new_payee: false,
-      policy_version: this.policy.version, fee_version: this.fees.version, idempotency_key: body.idempotencyKey ?? null, created_at: this.now().toISOString(),
-    });
-    await this.store.postLedger(plan.ledger, `transfer:${id}`);
-    await this.store.insert("holds", { account_id: chk.id, family_member_id: null, kind: "ach_in", amount_cents: plan.holdCents, status: "active", ref_id: id, expires_at: null, release_at: plan.settleAt.toISOString(), created_at: this.now().toISOString(), released_at: null });
+    const at = this.now().toISOString();
+    await this.store.achPullCreate({
+      transfer: {
+        id, user_id: c.userId, kind: "ach_in", speed: null, to_account_id: chk.id, from_account_id: null, linked_bank_id: bank.id, counterparty_user_id: null,
+        family_member_id: null, amount_cents: body.amountCents, fee_cents: 0, status: "pending", settle_at: plan.settleAt.toISOString(), return_code: null,
+        new_payee: false, policy_version: this.policy.version, fee_version: this.fees.version, idempotency_key: this.transferIdemKey(c, body.idempotencyKey),
+        created_at: at, settled_at: null,
+      },
+      ledger: { ...plan.ledger, idem: `transfer:${id}` },
+      hold: { id: uuid(), account_id: chk.id, family_member_id: null, kind: "ach_in", amount_cents: plan.holdCents, status: "active", ref_id: id, expires_at: null, release_at: plan.settleAt.toISOString(), created_at: at, released_at: null },
+      limit: limitWindow(p.tier, "ach_in", this.now(), this.policy),
+      at,
+    }).catch((e) => this.opFailed(e));
     return { id, status: "pending", amountCents: body.amountCents, settleAt: plan.settleAt.toISOString(), holdCents: plan.holdCents };
   }
 
@@ -365,9 +389,7 @@ export class HarborService {
     let settled = 0;
     for (const t of await this.store.list("transfers", { status: "pending" })) {
       if (!t.settle_at || !canSettle(new Date(t.settle_at), now)) continue;
-      await this.store.update("transfers", { id: t.id }, { status: "settled", settled_at: now.toISOString() });
-      await this.store.update("holds", { ref_id: t.id, status: "active" }, { status: "released", released_at: now.toISOString() });
-      settled++;
+      if (await this.store.achSettle({ transferId: t.id, at: now.toISOString() })) settled++;
     }
     return { settled };
   }
@@ -381,10 +403,10 @@ export class HarborService {
     try { plan = planAchReturn({ transferId, accountId: t.to_account_id, amountCents: Number(t.amount_cents), returnCode: code, status: t.status, postedBalanceCents: posted }, this.policy); }
     catch (e) { throw new ApiError(409, "already_returned", (e as Error).message); }
     if (!plan.reverses) return { reversed: false, code };
-    await this.store.postLedger(plan.ledger!, `return:${transferId}`);
-    await this.store.update("holds", { ref_id: transferId, status: "active" }, { status: "released", released_at: this.now().toISOString() });
-    await this.store.update("transfers", { id: transferId }, { status: "returned", return_code: code });
-    await this.audit(c.userId, "ach_return", "transfer", transferId, code, { negativeBalanceCents: plan.negativeBalanceCents });
+    await this.store.achReturn({
+      transferId, code, ledger: { ...plan.ledger!, idem: `return:${transferId}` }, at: this.now().toISOString(),
+      actorId: c.userId, audit: { negativeBalanceCents: plan.negativeBalanceCents },
+    }).catch((e) => this.opFailed(e));
     return { reversed: true, code, negativeBalanceCents: plan.negativeBalanceCents, heldBeforeSettlement: plan.releaseHold };
   }
 
@@ -406,13 +428,18 @@ export class HarborService {
     try { plan = planAchPush({ transferId: id, amountCents: body.amountCents, speed: body.speed === "instant" ? "instant" : "standard", bank, sender, now: this.now() }, this.policy, this.fees); }
     catch (e) { this.mapTransferError(e); }
     const instant = body.speed === "instant";
-    await this.store.insert("transfers", {
-      id, user_id: c.userId, kind: "ach_out", speed: instant ? "instant" : "standard", from_account_id: sender.accountId, to_account_id: null, linked_bank_id: bank.id,
-      counterparty_user_id: null, amount_cents: body.amountCents, fee_cents: plan!.feeCents, status: instant ? "completed" : "pending",
-      settle_at: instant ? null : addBusinessDays(this.now(), 1, this.policy.holidays).toISOString(),
-      return_code: null, new_payee: false, policy_version: this.policy.version, fee_version: this.fees.version, idempotency_key: body.idempotencyKey ?? null, created_at: this.now().toISOString(),
-    });
-    await this.store.postLedger(plan!.ledger, `transfer:${id}`);
+    const at = this.now().toISOString();
+    await this.store.achPush({
+      transfer: {
+        id, user_id: c.userId, kind: "ach_out", speed: instant ? "instant" : "standard", from_account_id: sender.accountId, to_account_id: null, linked_bank_id: bank.id,
+        counterparty_user_id: null, family_member_id: null, amount_cents: body.amountCents, fee_cents: plan!.feeCents, status: instant ? "completed" : "pending",
+        settle_at: instant ? null : addBusinessDays(this.now(), 1, this.policy.holidays).toISOString(), return_code: null, new_payee: false,
+        policy_version: this.policy.version, fee_version: this.fees.version, idempotency_key: this.transferIdemKey(c, body.idempotencyKey), created_at: at, settled_at: null,
+      },
+      ledger: { ...plan!.ledger, idem: `transfer:${id}` },
+      limit: limitWindow(sender.tier, "transfer_out", this.now(), this.policy),
+      at,
+    }).catch((e) => this.opFailed(e));
     return { id, status: instant ? "completed" : "pending", amountCents: body.amountCents, feeCents: plan!.feeCents, totalDebitCents: plan!.totalDebitCents };
   }
 
@@ -430,13 +457,19 @@ export class HarborService {
     let plan;
     try { plan = planP2P({ transferId: id, amountCents: body.amountCents, senderUserId: c.userId, sender, recipient, knownPayee: known, stepUpVerified, now: this.now() }, this.policy, this.fees); }
     catch (e) { this.mapTransferError(e); }
-    await this.store.insert("transfers", {
-      id, user_id: c.userId, kind: "p2p", speed: null, from_account_id: sender.accountId, to_account_id: recipient!.accountId, linked_bank_id: null,
-      counterparty_user_id: recipient!.userId, amount_cents: body.amountCents, fee_cents: plan!.feeCents, status: "completed", settle_at: null, return_code: null,
-      new_payee: plan!.newPayee, policy_version: this.policy.version, fee_version: this.fees.version, idempotency_key: body.idempotencyKey ?? null, created_at: this.now().toISOString(),
-    });
-    await this.store.postLedger(plan!.ledger, `transfer:${id}`);
-    if (!known) await this.store.insert("payees", { user_id: c.userId, payee_user_id: recipient!.userId, first_paid_at: this.now().toISOString() });
+    const at = this.now().toISOString();
+    await this.store.p2pTransfer({
+      transfer: {
+        id, user_id: c.userId, kind: "p2p", speed: null, from_account_id: sender.accountId, to_account_id: recipient!.accountId, linked_bank_id: null,
+        counterparty_user_id: recipient!.userId, family_member_id: null, amount_cents: body.amountCents, fee_cents: plan!.feeCents, status: "completed", settle_at: null,
+        return_code: null, new_payee: plan!.newPayee, policy_version: this.policy.version, fee_version: this.fees.version,
+        idempotency_key: this.transferIdemKey(c, body.idempotencyKey), created_at: at, settled_at: null,
+      },
+      ledger: { ...plan!.ledger, idem: `transfer:${id}` },
+      payee: known ? null : { user_id: c.userId, payee_user_id: recipient!.userId, first_paid_at: at },
+      limit: limitWindow(sender.tier, "transfer_out", this.now(), this.policy),
+      at,
+    }).catch((e) => this.opFailed(e));
     return { id, status: "completed", amountCents: body.amountCents, newPayee: plan!.newPayee };
   }
 
@@ -449,12 +482,16 @@ export class HarborService {
     let t;
     try { t = planPocketMove({ transferId: id, fromAccountId: from.id, toAccountId: to.id, amountCents: body.amountCents, availableCents: (await this.balanceOf(from.id)).availableCents, kyc: p.kyc_state }); }
     catch (e) { this.mapTransferError(e); }
-    await this.store.insert("transfers", {
-      id, user_id: c.userId, kind: "pocket", speed: null, from_account_id: from.id, to_account_id: to.id, linked_bank_id: null, counterparty_user_id: null,
-      amount_cents: body.amountCents, fee_cents: 0, status: "completed", settle_at: null, return_code: null, new_payee: false,
-      policy_version: this.policy.version, fee_version: this.fees.version, idempotency_key: body.idempotencyKey ?? null, created_at: this.now().toISOString(),
-    });
-    await this.store.postLedger(t!, `transfer:${id}`);
+    const at = this.now().toISOString();
+    await this.store.pocketMove({
+      transfer: {
+        id, user_id: c.userId, kind: "pocket", speed: null, from_account_id: from.id, to_account_id: to.id, linked_bank_id: null, counterparty_user_id: null,
+        family_member_id: null, amount_cents: body.amountCents, fee_cents: 0, status: "completed", settle_at: null, return_code: null, new_payee: false,
+        policy_version: this.policy.version, fee_version: this.fees.version, idempotency_key: this.transferIdemKey(c, body.idempotencyKey), created_at: at, settled_at: null,
+      },
+      ledger: { ...t!, idem: `transfer:${id}` },
+      at,
+    }).catch((e) => this.opFailed(e));
     return { id, status: "completed" };
   }
 
@@ -527,16 +564,26 @@ export class HarborService {
       mcc: String(req.mcc).padStart(4, "0").slice(0, 4), merchant: req.merchant ?? "Merchant", foreign_txn: !!req.foreign, atm_out_of_network: !!req.atmOutOfNetwork,
       captured_cents: 0, refunded_cents: 0, created_at: now.toISOString(), captured_at: null,
     };
+    const at = now.toISOString();
     if (!decision.approved) {
-      await this.store.insert("card_authorizations", { ...base, fee_cents: 0, status: "declined", decline_reason: decision.reason, hold_id: null, funding_account: "customer_deposits", funding_party: card.account_id, expires_at: now.toISOString() });
-      return { authorizationId: id, approved: false, reason: decision.reason };
+      const r = await this.store.cardAuthorize({
+        auth: { ...base, fee_cents: 0, status: "declined", decline_reason: decision.reason, hold_id: null, funding_account: "customer_deposits", funding_party: card.account_id, expires_at: at },
+        hold: null, at,
+      });
+      return { authorizationId: id, approved: false, reason: r.reason ?? decision.reason };
     }
     const teen = decision.funding.account === "family_allowance";
-    const hold = await this.store.insert("holds", {
-      account_id: teen ? null : card.account_id, family_member_id: teen ? decision.funding.party : null, kind: "card_auth", amount_cents: decision.holdCents,
-      status: "active", ref_id: id, expires_at: decision.expiresAt.toISOString(), release_at: null, created_at: now.toISOString(), released_at: null,
+    // The store re-checks the funding pocket under a lock; if a concurrent debit used the money,
+    // the authorization is recorded as declined instead of placing the hold.
+    const r = await this.store.cardAuthorize({
+      auth: { ...base, fee_cents: decision.feeCents, status: "authorized", decline_reason: null, hold_id: null, funding_account: decision.funding.account, funding_party: decision.funding.party, expires_at: decision.expiresAt.toISOString() },
+      hold: {
+        id: uuid(), account_id: teen ? null : card.account_id, family_member_id: teen ? decision.funding.party : null, kind: "card_auth", amount_cents: decision.holdCents,
+        status: "active", ref_id: id, expires_at: decision.expiresAt.toISOString(), release_at: null, created_at: at, released_at: null,
+      },
+      at,
     });
-    await this.store.insert("card_authorizations", { ...base, fee_cents: decision.feeCents, status: "authorized", decline_reason: null, hold_id: hold.id, funding_account: decision.funding.account, funding_party: decision.funding.party, expires_at: decision.expiresAt.toISOString() });
+    if (!r.approved) return { authorizationId: id, approved: false, reason: r.reason };
     return { authorizationId: id, approved: true, holdCents: decision.holdCents, feeCents: decision.feeCents, expiresAt: decision.expiresAt.toISOString() };
   }
 
@@ -546,9 +593,8 @@ export class HarborService {
     let plan;
     try { plan = planCapture(this.toAuth(a), amountCents, this.now(), this.policy, this.fees); }
     catch (e) { throw new ApiError(422, "capture_rejected", (e as Error).message); }
-    await this.store.postLedger(plan.ledger, `capture:${authId}`);
-    await this.store.update("holds", { id: a.hold_id }, { status: "captured", released_at: this.now().toISOString() });
-    await this.store.update("card_authorizations", { id: authId }, { status: "captured", captured_cents: plan.capturedCents, fee_cents: plan.feeCents, captured_at: this.now().toISOString() });
+    await this.store.cardCapture({ authId, capturedCents: plan.capturedCents, feeCents: plan.feeCents, ledger: { ...plan.ledger, idem: `capture:${authId}` }, at: this.now().toISOString() })
+      .catch((e) => this.opFailed(e, { status: 422, code: "capture_rejected" }));
     return { authorizationId: authId, capturedCents: plan.capturedCents, feeCents: plan.feeCents, releasedCents: plan.releasedCents };
   }
 
@@ -562,11 +608,9 @@ export class HarborService {
     try { plan = planMerchantRefund({ refundId, auth: this.toAuth(a), capturedCents: Number(a.captured_cents), refundedSoFarCents: Number(a.refunded_cents), amountCents, postedRefundIds: posted }); }
     catch (e) { throw new ApiError(422, "refund_rejected", (e as Error).message); }
     if (plan.duplicate) return { refundId, duplicate: true, refundedCents: Number(a.refunded_cents) };
-    await this.store.insert("card_refunds", { id: refundId, auth_id: authId, amount_cents: amountCents });
-    await this.store.postLedger(plan.ledger, `refund:${refundId}`);
-    const refunded = Number(a.refunded_cents) + amountCents;
-    await this.store.update("card_authorizations", { id: authId }, { refunded_cents: refunded });
-    return { refundId, duplicate: false, refundedCents: refunded };
+    const r = await this.store.cardRefund({ refundId, authId, amountCents, ledger: { ...plan.ledger, idem: `refund:${refundId}` }, at: this.now().toISOString() })
+      .catch((e) => this.opFailed(e, e instanceof MoneyOpError && e.code === "refund_id_conflict" ? { status: 409, code: "refund_id_conflict" } : { status: 422, code: "refund_rejected" }));
+    return { refundId, duplicate: r.duplicate, refundedCents: r.refundedCents };
   }
 
   async expireAuths(c: Caller | null) {
@@ -575,9 +619,7 @@ export class HarborService {
     let expired = 0;
     for (const a of await this.store.list("card_authorizations", { status: "authorized" })) {
       if (new Date(a.expires_at).getTime() > now.getTime()) continue;
-      await this.store.update("card_authorizations", { id: a.id }, { status: "expired" });
-      await this.store.update("holds", { id: a.hold_id }, { status: "expired", released_at: now.toISOString() });
-      expired++;
+      if (await this.store.cardExpireAuth({ authId: a.id, at: now.toISOString() })) expired++;
     }
     return { expired };
   }
@@ -634,12 +676,16 @@ export class HarborService {
     let t;
     try { t = planAllowanceTopUp({ id: tid, ownerAccountId: chk.id, member: this.toMember(m), amountCents, ownerAvailableCents: (await this.balanceOf(chk.id)).availableCents }); }
     catch (e) { throw new ApiError(422, "allowance_rejected", (e as Error).message); }
-    await this.store.insert("transfers", {
-      id: tid, user_id: c.userId, kind: "allowance_topup", speed: null, from_account_id: chk.id, to_account_id: null, family_member_id: id, linked_bank_id: null, counterparty_user_id: null,
-      amount_cents: amountCents, fee_cents: 0, status: "completed", settle_at: null, return_code: null, new_payee: false,
-      policy_version: this.policy.version, fee_version: this.fees.version, idempotency_key: idempotencyKey ?? null, created_at: this.now().toISOString(),
-    });
-    await this.store.postLedger(t, `transfer:${tid}`);
+    const at = this.now().toISOString();
+    await this.store.allowanceTopUp({
+      transfer: {
+        id: tid, user_id: c.userId, kind: "allowance_topup", speed: null, from_account_id: chk.id, to_account_id: null, family_member_id: id, linked_bank_id: null,
+        counterparty_user_id: null, amount_cents: amountCents, fee_cents: 0, status: "completed", settle_at: null, return_code: null, new_payee: false,
+        policy_version: this.policy.version, fee_version: this.fees.version, idempotency_key: this.transferIdemKey(c, idempotencyKey), created_at: at, settled_at: null,
+      },
+      ledger: { ...t, idem: `transfer:${tid}` },
+      at,
+    }).catch((e) => this.opFailed(e, { status: 422, code: "allowance_rejected" }));
     return { id: tid, memberId: id, allowance: await this.allowanceOf(id) };
   }
 
@@ -661,11 +707,14 @@ export class HarborService {
         now: this.now(), accountOpenedAt: new Date(acct!.opened_at), existingOpen,
       }, this.policy);
     } catch (e) { throw new ApiError(422, "dispute_rejected", (e as Error).message); }
-    return this.store.insert("disputes", {
-      id: dsp.id, auth_id: a.id, user_id: acct!.user_id, credit_account: dsp.creditAccount, credit_party: dsp.accountId, amount_cents: dsp.amountCents,
-      reason: body.reason, status: "open", provisional_credit_cents: 0, provisional_credit_due_at: dsp.provisionalCreditDueAt.toISOString(),
-      resolution_due_at: dsp.resolutionDueAt.toISOString(), policy_version: this.policy.version, opened_at: dsp.openedAt.toISOString(), resolved_at: null,
-    });
+    return this.store.disputeOpen({
+      dispute: {
+        id: dsp.id, auth_id: a.id, user_id: acct!.user_id, credit_account: dsp.creditAccount, credit_party: dsp.accountId, amount_cents: dsp.amountCents,
+        reason: body.reason, status: "open", provisional_credit_cents: 0, provisional_credit_due_at: dsp.provisionalCreditDueAt.toISOString(),
+        resolution_due_at: dsp.resolutionDueAt.toISOString(), policy_version: this.policy.version, opened_at: dsp.openedAt.toISOString(), resolved_at: null,
+      },
+      at: this.now().toISOString(),
+    }).catch((e) => this.opFailed(e, { status: 422, code: "dispute_rejected" }));
   }
 
   toDispute(r: Row): Dispute {
@@ -682,8 +731,8 @@ export class HarborService {
     if (!r) throw new ApiError(404, "not_found");
     let plan;
     try { plan = planProvisionalCredit(this.toDispute(r)); } catch (e) { throw new ApiError(409, "invalid_transition", (e as Error).message); }
-    await this.store.postLedger(plan.ledger, `dispute_pc:${disputeId}`);
-    await this.store.update("disputes", { id: disputeId }, { status: plan.dispute.status, provisional_credit_cents: plan.dispute.provisionalCreditCents });
+    await this.store.disputeProvisionalCredit({ disputeId, ledger: { ...plan.ledger, idem: `dispute_pc:${disputeId}` }, at: this.now().toISOString() })
+      .catch((e) => this.opFailed(e, { status: 409, code: "invalid_transition" }));
     return { id: disputeId, status: plan.dispute.status, provisionalCreditCents: plan.dispute.provisionalCreditCents };
   }
 
@@ -694,9 +743,10 @@ export class HarborService {
     if (!r) throw new ApiError(404, "not_found");
     let plan;
     try { plan = resolveDispute(this.toDispute(r), outcome); } catch (e) { throw new ApiError(409, "invalid_transition", (e as Error).message); }
-    if (plan.ledger) await this.store.postLedger(plan.ledger, `dispute_resolve:${disputeId}`);
-    await this.store.update("disputes", { id: disputeId }, { status: outcome, provisional_credit_cents: plan.dispute.provisionalCreditCents, resolved_at: this.now().toISOString() });
-    await this.audit(c.userId, "dispute_resolved", "dispute", disputeId, outcome);
+    await this.store.disputeResolve({
+      disputeId, outcome, expectedStatus: r.status, provisionalCreditCents: plan.dispute.provisionalCreditCents,
+      ledger: plan.ledger ? { ...plan.ledger, idem: `dispute_resolve:${disputeId}` } : null, at: this.now().toISOString(), actorId: c.userId,
+    }).catch((e) => this.opFailed(e, { status: 409, code: "invalid_transition" }));
     return { id: disputeId, status: outcome };
   }
 
@@ -735,8 +785,12 @@ export class HarborService {
       const prev = (await this.store.list("interest_postings", { account_id: a.id })).sort((x, y) => y.period.localeCompare(x.period))[0];
       const carryIn = prev ? BigInt(prev.carry_out_micro) : 0n;
       const plan = planMonthlyInterest({ accountId: a.id, period, accruedMicro: accrued, carryInMicro: carryIn });
-      if (plan.ledger) await this.store.postLedger(plan.ledger, `interest:${a.id}:${period}`);
-      await this.store.insert("interest_postings", { account_id: a.id, period, accrued_micro: Number(accrued), carry_in_micro: Number(carryIn), posted_cents: plan.postCents, carry_out_micro: Number(plan.carryMicro) });
+      const posted = await this.store.postInterest({
+        posting: { account_id: a.id, period, accrued_micro: Number(accrued), carry_in_micro: Number(carryIn), posted_cents: plan.postCents, carry_out_micro: Number(plan.carryMicro) },
+        ledger: plan.ledger ? { ...plan.ledger, idem: `interest:${a.id}:${period}` } : null,
+        at: this.now().toISOString(),
+      });
+      if (!posted) continue; // a concurrent run posted this account + period first
       out.push({ accountId: a.id, postedCents: plan.postCents, carryMicro: Number(plan.carryMicro) });
     }
     return { period, postings: out };
@@ -779,24 +833,33 @@ export class HarborService {
     }
     const closureId = uuid();
     const plan = planClosure(input, closureId);
-    for (const id of plan.cardsToCancel) {
+    const at = now.toISOString();
+    const allowanceOf = new Map(allowance.map((x) => [x.memberId, x.postedCents]));
+    // One atomic operation: cancel cards, pay out every pocket, close accounts, remove family
+    // members, record the closure. It aborts if a balance, hold or dispute changed since planning.
+    const { canceledCardIds } = await this.store.closeAccount({
+      userId: c.userId,
+      closure: { id: closureId, user_id: c.userId, payout_cents: plan.payoutCents, linked_bank_id: bankRow?.id ?? null, status: "completed", blocks: [], created_at: at },
+      expected: {
+        accounts: pocketsBal.map((x) => ({ id: x.accountId, postedCents: x.postedCents })),
+        members: members.map((m) => ({ id: m.id, postedCents: allowanceOf.get(m.id) ?? 0 })),
+      },
+      ledger: plan.ledger ? { ...plan.ledger, idem: `closure:${closureId}` } : null,
+      payoutTransfer: plan.ledger ? {
+        id: uuid(), user_id: c.userId, kind: "closure_payout", speed: null, from_account_id: pockets.find((a) => a.kind === "checking")?.id ?? null, to_account_id: null,
+        linked_bank_id: bankRow!.id, counterparty_user_id: null, family_member_id: null, amount_cents: plan.payoutCents, fee_cents: 0, status: "pending", settle_at: null,
+        return_code: null, new_payee: false, policy_version: this.policy.version, fee_version: this.fees.version, idempotency_key: null, created_at: at, settled_at: null,
+      } : null,
+      at, actorId: c.userId, audit: { payoutCents: plan.payoutCents },
+    }).catch((e) => this.opFailed(e));
+    // The database is the source of truth for authorizations, so cards are canceled there first;
+    // then the issuer is told. An issuer failure is audited for support to retry.
+    for (const id of canceledCardIds) {
       const card = await this.store.one("cards", { id });
-      await this.providers.issuer.setStatus(card!.provider_card_id, "canceled");
-      await this.store.update("cards", { id }, { status: "canceled", canceled_at: now.toISOString() });
+      try { await this.providers.issuer.setStatus(card!.provider_card_id, "canceled"); }
+      catch (e) { await this.audit(c.userId, "issuer_cancel_failed", "card", id, (e as Error).message); }
     }
-    if (plan.ledger) {
-      await this.store.postLedger(plan.ledger, `closure:${closureId}`);
-      await this.store.insert("transfers", {
-        user_id: c.userId, kind: "closure_payout", speed: null, from_account_id: pockets.find((a) => a.kind === "checking")?.id ?? null, to_account_id: null,
-        linked_bank_id: bankRow!.id, counterparty_user_id: null, amount_cents: plan.payoutCents, fee_cents: 0, status: "pending", settle_at: null, return_code: null,
-        new_payee: false, policy_version: this.policy.version, fee_version: this.fees.version, idempotency_key: null, created_at: now.toISOString(),
-      });
-    }
-    for (const a of pockets) await this.store.update("accounts", { id: a.id }, { status: "closed", closed_at: now.toISOString() });
-    for (const m of members) await this.store.update("family_members", { id: m.id }, { status: "removed" });
-    await this.store.insert("closures", { id: closureId, user_id: c.userId, payout_cents: plan.payoutCents, linked_bank_id: bankRow?.id ?? null, status: "completed", blocks: [] });
-    await this.audit(c.userId, "account_closed", "profile", c.userId, undefined, { payoutCents: plan.payoutCents });
-    return { closureId, payoutCents: plan.payoutCents, cardsCanceled: plan.cardsToCancel.length };
+    return { closureId, payoutCents: plan.payoutCents, cardsCanceled: canceledCardIds.length };
   }
 
   // ---------- admin ----------

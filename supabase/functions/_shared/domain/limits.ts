@@ -40,3 +40,11 @@ export function checkLimit(tier: Tier, kind: LimitKind, amountCents: number, eve
   if (amountCents > remainingMonthly) return { ok: false, reason: "monthly_limit", remainingDaily, remainingMonthly };
   return { ok: true, remainingDaily, remainingMonthly };
 }
+
+/** The window a limit check covered, so storage can re-check it atomically when it writes. */
+export interface LimitWindow { kind: LimitKind; dailyCents: number; monthlyCents: number; dayStart: Date; monthStart: Date }
+
+export function limitWindow(tier: Tier, kind: LimitKind, now: Date, policy: MoneyPolicy): LimitWindow {
+  const { daily, monthly } = limitsFor(tier, kind, policy);
+  return { kind, dailyCents: daily, monthlyCents: monthly, dayStart: startOfUtcDay(now), monthStart: startOfUtcMonth(now) };
+}

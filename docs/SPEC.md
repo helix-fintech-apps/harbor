@@ -16,12 +16,24 @@ Business banking is a separate app (app 3); Harbor has no business accounts.
   test fails if they drift. Accounts, transfers and disputes store `policy_version` / `fee_version`.
 - Writes to money tables happen ONLY in the `api` Edge Function with the service role. Browser reads via supabase-js under RLS;
   `anon`/`authenticated` have no INSERT/UPDATE/DELETE grants on any table.
-- Every money event posts a balanced double-entry txn (`ledger.ts` → `post_ledger_txn()` → `ledger_txns` + `ledger_lines`).
+- Every money event posts a balanced double-entry txn (`ledger.ts` → `ledger_txns` + `ledger_lines`).
   A DEFERRABLE constraint trigger rejects unbalanced txns at commit; the ledger is append-only (update/delete raise).
+- **Atomic money operations.** Every money operation that writes more than one row (ACH pull + hold, ACH settle, ACH return,
+  withdrawal + fee, P2P + payee, pocket move, allowance top-up, card authorization + hold, capture, auth expiry, merchant refund,
+  dispute open / provisional credit / resolve, interest posting, account closure) is ONE Postgres function
+  (`harbor_*`, migration `20260924000004_atomic_money_ops.sql`) called via RPC by `SupabaseStore`; `MemoryStore` implements the same
+  operation with the same guards and rolls back all of its writes on failure. The domain still plans the amounts; the operation
+  re-checks under row locks what a concurrent request could change: state compare-and-set (capture, settle, return, expiry, dispute
+  steps), available balance for debits and card holds (a card hold that no longer fits is recorded as a decline), the tier limit
+  window for transfers out and ACH deposits, refund bounds, one open dispute per purchase, and closure preconditions (payout leaves
+  every pocket at exactly zero). A refused operation raises `harbor:<code>` and writes nothing; the API maps it to the endpoint's
+  usual error (`insufficient_funds`, `daily_limit`, `capture_rejected`, `refund_rejected`, `dispute_rejected`,
+  `invalid_transition`, `already_returned`, `closure_state_changed`, …). Replaying an operation for the same business key never posts twice.
 - Balances are derived: **posted** = ledger (credits − debits on `customer_deposits`, party = account id);
   **available** = posted − active holds (`ach_in` deposit holds, `card_auth` holds; expired holds don't count).
 - Every mutating endpoint accepts `Idempotency-Key`; a replay returns the first response (header `Idempotent-Replayed: true`);
-  reusing a key with a different body → 422 `idempotency_conflict`. Ledger posts are also idempotent per business key.
+  reusing a key with a different body → 422 `idempotency_conflict`. Ledger posts are also idempotent per business key, and
+  `transfers.idempotency_key` stores the key namespaced by user (`<userId>:<key>`, unique) as a second guard.
 - Providers (interface + fake + real test mode). Fakes are deterministic and used in CI / demo / when no keys:
   - Identity: `FakeIdentity` | `StripeIdentity` (Stripe Identity, `sk_test_` only).
   - Bank link: `FakeBankLink` | `PlaidSandbox` (REST: `/link/token/create`, `/item/public_token/exchange`, `/auth/get`, `/identity/get`).
@@ -92,8 +104,11 @@ Monthly statement = ledger lines for the account: opening + credits − debits =
 `customer_deposits` (party = account), `family_allowance` (party = member), `ach_clearing`, `card_settlement`, `fee_revenue`, `interest_expense`, `dispute_receivable`, `dispute_loss`, `ach_return_loss`, `closure_payout`.
 
 ## Supabase
-No hosted project yet (free-tier limit). Migrations in `supabase/migrations/` (schema, RLS, generated policy/fee seed) are validated against a
-local Postgres 16 with a stub `auth` schema: `npm run db:check` (`scripts/ci/db_validate.sh` + `scripts/ci/db_checks.sql`).
+No hosted project yet (free-tier limit). Migrations in `supabase/migrations/` (schema, RLS, generated policy/fee seed, atomic money
+operations) are validated against a local Postgres 16 with a stub `auth` schema: `npm run db:check` (`scripts/ci/db_validate.sh` +
+`scripts/ci/db_checks.sql`, which also exercises every `harbor_*` operation: replay, guards, rollback, privileges).
+`npm run test:integration:pg` runs the integration suite on that Postgres too (real service + `SupabaseStore` + the SQL functions,
+through a small supabase-js stand-in over node-postgres), so both stores are held to the same behaviour.
 Demo users (in-browser demo mode; create the same users in Supabase Auth when a project exists): `ava@harbor.test` (approved, $2,500),
 `ben@harbor.test` (approved, $500), `rita@harbor.test` (needs_review), `oleg@harbor.test` (frozen_legal, sanctions), `nia@harbor.test` (unverified),
 `admin@harbor.test`, `agent@harbor.test` (support). Password: `Harbor!2026` (test only).

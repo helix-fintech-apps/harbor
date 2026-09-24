@@ -5,7 +5,12 @@ Mutations accept `Idempotency-Key: <uuid>`; a replay returns the first response 
 the same key with a different body → `422 idempotency_conflict`. Amounts are integer cents.
 Errors: `{"error": {"code": "...", "message": "...", "details"?: ...}}` (401 unauthenticated, 403 forbidden/kyc, 404 not found, 409 state conflict, 422 rule violation).
 
-Implementation: `supabase/functions/api/index.ts` → `_shared/app/router.ts` → `_shared/app/service.ts` → `_shared/domain/*`.
+Implementation: `supabase/functions/api/index.ts` → `_shared/app/router.ts` → `_shared/app/service.ts` → `_shared/domain/*`;
+multi-row money writes go through one `harbor_*` SQL function each (atomic, re-checked under row locks; see SPEC "Atomic money operations").
+If the state changed between the request's checks and its write (a concurrent request spent the money, captured the auth, …), the
+write is refused as a whole and the endpoint returns its usual error for that rule (e.g. 422 `insufficient_funds` / `daily_limit`,
+422 `capture_rejected`, 409 `invalid_transition`, 409 `closure_state_changed`). A card authorization whose hold no longer fits is
+recorded and returned as a decline (`insufficient_funds` / `allowance_exceeded`).
 
 ## Public
 | Method + path | Does |
@@ -35,7 +40,7 @@ Implementation: `supabase/functions/api/index.ts` → `_shared/app/router.ts` �
 | POST /family/:id/allowance | `{amountCents}` | Top up teen allowance from checking |
 | POST /disputes | `{authorizationId, amountCents, reason}` | Open a dispute on a captured purchase (window, amount, one-open rules) |
 | GET /statements?accountId=&period=YYYY-MM | — | Statement from the ledger: opening, credits, debits, closing, entries with running balance |
-| POST /accounts/close | `{bankId?}` | Close: 409 `closure_blocked` with `details` = blocks (`pending_holds`, `negative_balance`, `open_disputes`, `payout_blocked`, `no_linked_bank`) |
+| POST /accounts/close | `{bankId?}` | Close: 409 `closure_blocked` with `details` = blocks (`pending_holds`, `negative_balance`, `open_disputes`, `payout_blocked`, `no_linked_bank`); 409 `closure_state_changed` if money moved while closing (retry) |
 
 ## Card network simulator (fake issuer only; 404 when Stripe Issuing is configured)
 | Method + path | Body | Does |

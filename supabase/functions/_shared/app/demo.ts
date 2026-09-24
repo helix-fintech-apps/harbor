@@ -1,34 +1,48 @@
 // In-memory Harbor (fake providers) with a controllable clock and demo seed data.
 // Used by integration tests and by the web UI's demo mode (no Supabase project required).
+// `createApp` builds the same app over any Store (tests also run it on Postgres).
 
 import { fakeProviders } from "../providers/index.ts";
-import { MemoryStore } from "./store.ts";
+import { MemoryStore, type Store } from "./store.ts";
 import { HarborService, type Caller } from "./service.ts";
 import { route, type ApiRequest } from "./router.ts";
 
-export interface MemoryApp {
-  store: MemoryStore;
+export interface DemoClock { now: () => Date; advanceHours: (h: number) => void; set: (d: Date) => void; offsetMs: number }
+
+export interface App<S extends Store = Store> {
+  store: S;
   service: HarborService;
-  clock: { now: () => Date; advanceHours: (h: number) => void; set: (d: Date) => void; offsetMs: number };
+  clock: DemoClock;
   call: (caller: Caller | null, method: string, path: string, body?: unknown, opts?: { idempotencyKey?: string; query?: Record<string, string> }) => ReturnType<typeof route>;
 }
 
-export function createMemoryApp(start = new Date(), opts: { kycTimeoutMs?: number } = {}): MemoryApp {
-  const clock = {
+export type MemoryApp = App<MemoryStore>;
+
+/** A clock that starts at `start` and moves with real time, plus manual jumps. */
+export function demoClock(start = new Date()): DemoClock {
+  const clock: DemoClock = {
     offsetMs: start.getTime() - Date.now(),
     now() { return new Date(Date.now() + clock.offsetMs); },
     advanceHours(h: number) { clock.offsetMs += h * 3_600_000; },
     set(d: Date) { clock.offsetMs = d.getTime() - Date.now(); },
   };
-  const store = new MemoryStore(() => clock.now());
+  return clock;
+}
+
+export function createApp<S extends Store>(store: S, clock: DemoClock, opts: { kycTimeoutMs?: number } = {}): App<S> {
   const service = new HarborService({ store, providers: fakeProviders(), clock: () => clock.now(), kycTimeoutMs: opts.kycTimeoutMs ?? 2_000 });
-  const call: MemoryApp["call"] = (caller, method, path, body, o = {}) => {
+  const call: App["call"] = (caller, method, path, body, o = {}) => {
     const [p, qs] = path.split("?");
     const query = { ...Object.fromEntries(new URLSearchParams(qs ?? "")), ...(o.query ?? {}) };
     const req: ApiRequest = { method, path: p, body: body ?? {}, caller, idempotencyKey: o.idempotencyKey, query };
     return route(service, req);
   };
   return { store, service, clock, call };
+}
+
+export function createMemoryApp(start = new Date(), opts: { kycTimeoutMs?: number } = {}): MemoryApp {
+  const clock = demoClock(start);
+  return createApp(new MemoryStore(() => clock.now()), clock, opts);
 }
 
 export const DEMO_USERS = [
@@ -45,7 +59,7 @@ export const DEMO_USERS = [
  * Seed: Ava (approved, tier1, $2,500 settled + linked bank past cooling-off, virtual card),
  * Ben (approved, $500), Rita (needs_review), Oleg (frozen_legal via sanctions), Nia (unverified), staff.
  */
-export async function seedDemo(app: MemoryApp) {
+export async function seedDemo(app: Pick<App, "service" | "clock">) {
   const { service: s, clock } = app;
   for (const u of DEMO_USERS) await s.createProfile(u.id, u.email, u.legalName, u.role);
   const c = (id: string) => ({ userId: id, role: "customer" as const });

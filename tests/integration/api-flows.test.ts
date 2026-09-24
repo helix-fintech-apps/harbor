@@ -1,17 +1,22 @@
-import { createMemoryApp, seedDemo, DEMO_USERS, type MemoryApp } from "../../supabase/functions/_shared/app/demo.ts";
+import { DEMO_USERS } from "../../supabase/functions/_shared/app/demo.ts";
 import { assertNoLiveKeys, selectProviders } from "../../supabase/functions/_shared/providers/index.ts";
+import { harnesses, type TestApp } from "./support/harness.ts";
 
 const [AVA, BEN, RITA, OLEG, NIA, ADMIN] = DEMO_USERS;
 const as = (u: { id: string; role: string }) => ({ userId: u.id, role: u.role as "customer" | "admin" | "support_agent" });
-let app: MemoryApp;
 const body = (r: { body: unknown }) => r.body as any;
+
+// The same flows run on the in-memory store and, when HARBOR_PG_URL is set, on Postgres through
+// SupabaseStore and the harbor_* SQL functions (scripts/ci/with_pg.sh): both must behave identically.
+describe.each(harnesses().map((h) => [h.name, h] as const))("%s store", (_name, h) => {
+let app: TestApp;
 const me = async (u = AVA) => body(await app.call(as(u), "GET", "/me"));
 const checking = async (u = AVA) => (await me(u)).accounts.find((a: any) => a.kind === "checking");
 
 beforeEach(async () => {
-  app = createMemoryApp(new Date("2026-09-21T15:00:00Z"), { kycTimeoutMs: 20 }); // Monday
-  await seedDemo(app);
+  app = await h.create(new Date("2026-09-21T15:00:00Z")); // Monday
 });
+afterAll(() => h.close());
 
 describe("seeded onboarding", () => {
   it("assigns KYC states from identity + sanctions", async () => {
@@ -21,11 +26,11 @@ describe("seeded onboarding", () => {
     expect((await me(NIA)).profile.kycState).toBe("unverified");
   });
   it("vendor timeout leaves the customer pending, never approved", async () => {
-    await app.service.createProfile("00000000-0000-4000-8000-000000005100", "slow@harbor.test", "Sally Slow");
+    await app.addUser("00000000-0000-4000-8000-000000005100", "slow@harbor.test", "Sally Slow");
     const r = await app.call({ userId: "00000000-0000-4000-8000-000000005100", role: "customer" }, "POST", "/kyc/start");
     expect(body(r).state).toBe("pending");
     expect(body(r).identityStatus).toBe("timeout");
-    await app.service.createProfile("00000000-0000-4000-8000-000000005200", "w@harbor.test", "Wendy Weird");
+    await app.addUser("00000000-0000-4000-8000-000000005200", "w@harbor.test", "Wendy Weird");
     expect(body(await app.call({ userId: "00000000-0000-4000-8000-000000005200", role: "customer" }, "POST", "/kyc/start")).state).toBe("pending");
   });
   it("admin approves a needs_review customer and accounts open; customers can't use admin endpoints", async () => {
@@ -189,6 +194,8 @@ describe("disputes, interest, statements, closure", () => {
     await app.call(as(ADMIN), "POST", `/admin/users/${BEN.id}/kyc`, { state: "frozen_legal", reason: "OFAC hit" });
     expect(body(await app.call(as(BEN), "POST", "/accounts/close", {})).error.details).toContain("payout_blocked");
   });
+});
+
 });
 
 describe("providers", () => {
