@@ -12,5 +12,8 @@ insert into money_policies (version, policy, effective_from) values
 insert into fee_schedules (version, schedule, effective_from, published_at) values
   (${DEFAULT_FEES.version}, '${q(DEFAULT_FEES)}'::jsonb, '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z');
 `;
-writeFileSync(new URL("../supabase/migrations/20260924000003_policy_seed.sql", import.meta.url), sql);
+writeFileSync(
+  new URL("../supabase/migrations/20260924000003_policy_seed.sql", import.meta.url),
+  sql,
+);
 console.log("wrote policy seed");

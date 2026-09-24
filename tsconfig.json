@@ -13,7 +13,10 @@
     "resolveJsonModule": true,
     "types": ["vitest/globals"],
     "baseUrl": ".",
-    "paths": { "@domain": ["supabase/functions/_shared/domain/index.ts"], "@shared/*": ["supabase/functions/_shared/*"] }
+    "paths": {
+      "@domain": ["supabase/functions/_shared/domain/index.ts"],
+      "@shared/*": ["supabase/functions/_shared/*"]
+    }
   },
   "include": ["src", "tests", "supabase/functions/_shared"]
 }

@@ -4,7 +4,7 @@
 export type Tier = "tier1" | "tier2";
 
 export interface TierLimits {
-  dailyTransferOutCents: number;   // ACH push + instant + P2P sent, per UTC day
+  dailyTransferOutCents: number; // ACH push + instant + P2P sent, per UTC day
   monthlyTransferOutCents: number; // per UTC calendar month
   dailyCardSpendCents: number;
   monthlyCardSpendCents: number;
@@ -20,21 +20,21 @@ export interface MoneyPolicy {
     sanctionsFuzzyThresholdBps: number; // token-overlap score that counts as a potential match
   };
   achIn: {
-    holdBusinessDays: number;           // deposit is posted but not available until settlement
-    reversingReturnCodes: string[];     // codes that reverse + claw back the credit
+    holdBusinessDays: number; // deposit is posted but not available until settlement
+    reversingReturnCodes: string[]; // codes that reverse + claw back the credit
     nameMatchRequired: boolean;
   };
   achOut: {
-    coolingOffHours: number;            // no withdrawals to a bank linked less than N hours ago
+    coolingOffHours: number; // no withdrawals to a bank linked less than N hours ago
   };
   p2p: {
-    newPayeeStepUp: boolean;            // first transfer to a new payee needs step-up (2FA) confirmation
+    newPayeeStepUp: boolean; // first transfer to a new payee needs step-up (2FA) confirmation
     minCents: number;
   };
   cards: {
-    authValidityDays: number;           // uncaptured auth hold released after N days
+    authValidityDays: number; // uncaptured auth hold released after N days
     overCaptureToleranceBps: Record<string, number>; // by MCC group (restaurant tips etc.)
-    fuelMaxCaptureCents: number;        // fuel pumps authorize small, capture up to this
+    fuelMaxCaptureCents: number; // fuel pumps authorize small, capture up to this
     velocity: { maxAuths: number; windowMinutes: number };
     maxActiveVirtualCards: number;
   };
@@ -43,17 +43,17 @@ export interface MoneyPolicy {
     maxMembers: number;
   };
   disputes: {
-    windowDays: number;                  // days after posting a cardholder may dispute
+    windowDays: number; // days after posting a cardholder may dispute
     provisionalCreditBusinessDays: number;
     resolutionDays: number;
-    newAccountResolutionDays: number;    // extended timeline for accounts younger than newAccountDays
+    newAccountResolutionDays: number; // extended timeline for accounts younger than newAccountDays
     newAccountDays: number;
   };
   interest: {
-    savingsApyBps: number;               // applied as a simple daily rate: apy / 365 (documented)
+    savingsApyBps: number; // applied as a simple daily rate: apy / 365 (documented)
     dayCountBasis: number;
   };
-  holidays: string[];                    // YYYY-MM-DD, non-business days for ACH/dispute timelines
+  holidays: string[]; // YYYY-MM-DD, non-business days for ACH/dispute timelines
 }
 
 export interface FeeSchedule {
@@ -73,10 +73,10 @@ export const DEFAULT_POLICY: MoneyPolicy = {
   currency: "USD",
   tiers: {
     tier1: {
-      dailyTransferOutCents: 100_000,     // $1,000
-      monthlyTransferOutCents: 500_000,   // $5,000
-      dailyCardSpendCents: 200_000,       // $2,000
-      monthlyCardSpendCents: 1_000_000,   // $10,000
+      dailyTransferOutCents: 100_000, // $1,000
+      monthlyTransferOutCents: 500_000, // $5,000
+      dailyCardSpendCents: 200_000, // $2,000
+      monthlyCardSpendCents: 1_000_000, // $10,000
       dailyAchInCents: 250_000,
     },
     tier2: {
@@ -88,7 +88,11 @@ export const DEFAULT_POLICY: MoneyPolicy = {
     },
   },
   kyc: { vendorTimeoutMs: 10_000, sanctionsFuzzyThresholdBps: 8_000 },
-  achIn: { holdBusinessDays: 3, reversingReturnCodes: ["R01", "R02", "R03", "R04", "R10", "R16", "R29"], nameMatchRequired: true },
+  achIn: {
+    holdBusinessDays: 3,
+    reversingReturnCodes: ["R01", "R02", "R03", "R04", "R10", "R16", "R29"],
+    nameMatchRequired: true,
+  },
   achOut: { coolingOffHours: 72 },
   p2p: { newPayeeStepUp: true, minCents: 100 },
   cards: {
@@ -99,19 +103,34 @@ export const DEFAULT_POLICY: MoneyPolicy = {
     maxActiveVirtualCards: 3,
   },
   family: { teenRequiresGuardianApproval: true, maxMembers: 5 },
-  disputes: { windowDays: 60, provisionalCreditBusinessDays: 10, resolutionDays: 45, newAccountResolutionDays: 90, newAccountDays: 30 },
+  disputes: {
+    windowDays: 60,
+    provisionalCreditBusinessDays: 10,
+    resolutionDays: 45,
+    newAccountResolutionDays: 90,
+    newAccountDays: 30,
+  },
   interest: { savingsApyBps: 400, dayCountBasis: 365 },
-  holidays: ["2026-01-01", "2026-05-25", "2026-07-03", "2026-09-07", "2026-10-12", "2026-11-11", "2026-11-26", "2026-12-25"],
+  holidays: [
+    "2026-01-01",
+    "2026-05-25",
+    "2026-07-03",
+    "2026-09-07",
+    "2026-10-12",
+    "2026-11-11",
+    "2026-11-26",
+    "2026-12-25",
+  ],
 };
 
 export const DEFAULT_FEES: FeeSchedule = {
   version: 1,
   standardAchCents: 0,
-  instantTransferBps: 150,         // 1.5%
+  instantTransferBps: 150, // 1.5%
   instantTransferMinCents: 25,
   instantTransferMaxCents: 1_500,
   atmOutOfNetworkCents: 250,
-  foreignTransactionBps: 300,      // 3%
+  foreignTransactionBps: 300, // 3%
   cardReplacementCents: 0,
   p2pCents: 0,
 };

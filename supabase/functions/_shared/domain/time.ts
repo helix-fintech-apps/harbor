@@ -22,7 +22,8 @@ export function isBusinessDay(d: Date, holidays: string[] = []): boolean {
 
 /** Add N business days (same time of day). 0 returns the input unchanged. */
 export function addBusinessDays(d: Date, n: number, holidays: string[] = []): Date {
-  if (!Number.isInteger(n) || n < 0) throw new Error("business days must be a non-negative integer");
+  if (!Number.isInteger(n) || n < 0)
+    throw new Error("business days must be a non-negative integer");
   let cur = new Date(d.getTime());
   let left = n;
   while (left > 0) {

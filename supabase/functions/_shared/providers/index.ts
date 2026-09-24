@@ -8,7 +8,12 @@ export * from "./identity.ts";
 export * from "./bank.ts";
 export * from "./issuer.ts";
 
-export interface Providers { identity: IdentityProvider; bank: BankLinkProvider; issuer: CardIssuer; mode: "fake" | "test" }
+export interface Providers {
+  identity: IdentityProvider;
+  bank: BankLinkProvider;
+  issuer: CardIssuer;
+  mode: "fake" | "test";
+}
 
 export function selectProviders(env: Env): Providers {
   assertNoLiveKeys(env);
@@ -23,5 +28,10 @@ export function selectProviders(env: Env): Providers {
 }
 
 export function fakeProviders(): Providers {
-  return { identity: new FakeIdentity(), bank: new FakeBankLink(), issuer: new FakeIssuer(), mode: "fake" };
+  return {
+    identity: new FakeIdentity(),
+    bank: new FakeBankLink(),
+    issuer: new FakeIssuer(),
+    mode: "fake",
+  };
 }

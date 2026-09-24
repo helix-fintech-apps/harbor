@@ -7,6 +7,7 @@ every rule below is written down here, in the published terms page (`/fees`), an
 Business banking is a separate app (app 3); Harbor has no business accounts.
 
 ## Ground rules
+
 - Money = integer cents (`bigint` in SQL). Interest accrual uses integer **micro-cents** (1 cent = 1,000,000). Never floats.
 - All money logic lives in `supabase/functions/_shared/domain/*.ts` (pure, no I/O) with unit tests in `tests/unit/`.
   Reuse it; never duplicate rules in the UI or the API. Imports inside `supabase/functions` use explicit `.ts` extensions (Deno).
@@ -41,10 +42,13 @@ Business banking is a separate app (app 3); Harbor has no business accounts.
   - Refuse to boot with `sk_live_`/`rk_live_` or `PLAID_ENV` ≠ `sandbox`.
 
 ## Domain rules (policy v1)
+
 ### Onboarding / KYC (`kyc.ts`)
+
 States: `unverified → pending | needs_review | approved | rejected | frozen_legal`; `approved → suspended | frozen_legal`;
 `needs_review → approved | rejected | frozen_legal`; `rejected → needs_review` (appeal); `suspended → approved | rejected | frozen_legal`;
 `frozen_legal → approved | rejected` (admin only).
+
 - Approve only when identity = `verified` AND sanctions = `clear`. Vendor **timeout, error, `processing` or any unknown status → `pending`** (never approved).
 - Identity `requires_input` → `needs_review`; `canceled`/`failed` → `rejected`.
 - Sanctions screen against a fake list (normalized: case, accents, punctuation, suffixes). Exact → `frozen_legal`; token overlap ≥ 80% (≥2 tokens) → `needs_review`.
@@ -53,30 +57,35 @@ States: `unverified → pending | needs_review | approved | rejected | frozen_le
 - Fake identity: legal name containing `review` → requires_input, `fail` → canceled, `slow` → timeout, `weird` → unknown status, `pending` → processing; else verified.
 
 ### Tier limits (`limits.ts`) — inclusive boundaries, UTC day / UTC calendar month
-| | tier1 | tier2 |
-|---|---|---|
-| Transfers out / day (ACH push + instant + P2P) | $1,000 | $5,000 |
-| Transfers out / month | $5,000 | $25,000 |
-| Card spend / day (all cards incl. family) | $2,000 | $5,000 |
-| Card spend / month | $10,000 | $25,000 |
-| ACH deposits / day | $2,500 | $10,000 |
+
+|                                                | tier1   | tier2   |
+| ---------------------------------------------- | ------- | ------- |
+| Transfers out / day (ACH push + instant + P2P) | $1,000  | $5,000  |
+| Transfers out / month                          | $5,000  | $25,000 |
+| Card spend / day (all cards incl. family)      | $2,000  | $5,000  |
+| Card spend / month                             | $10,000 | $25,000 |
+| ACH deposits / day                             | $2,500  | $10,000 |
 
 ### Accounts (`accounts.ts`)
+
 One live checking + one savings pocket per user, opened on KYC approval. Fake routing `091000019` (ABA-checksum valid), 12-digit account numbers `8800…`.
 
 ### Money in (`achIn.ts`)
+
 - Link bank via Plaid (fake: public token `public-fake-<Institution>-<Owner_Name>`). **Owner name must match** the legal name (first + last token, any order, ignoring case/accents/middle names/suffixes); mismatched banks are recorded but unusable.
 - ACH pull: credit posts immediately; a hold for the full amount lasts **3 business days** (`achIn.holdBusinessDays`, weekends + listed holidays skipped); settlement job releases it.
 - Returns R01/R02/R03/R04/R10/R16/R29 reverse the credit. Before settlement the hold kept the money unavailable; after settlement the claw-back can make the balance negative. A transfer is returned at most once.
 - Direct-deposit switch form: validated and recorded only.
 
 ### Money out (`transfers.ts`)
+
 - ACH push standard: free, settles next business day. Instant: fee = 1.5% clamped to [$0.25, $15.00] (half-up rounding). Amount + fee ≤ available.
 - **Cooling-off**: no withdrawals to a bank linked < 72 h ago (exactly 72 h is allowed).
 - P2P to another approved Harbor user; min $1.00; not to self; **first payment to a new payee requires step-up** (fake code `000000`).
 - Pocket moves checking ↔ savings are not limited by tier.
 
 ### Debit cards (`cards.ts`)
+
 - Virtual: active instantly (max 3 live). Physical: `requested` until activated (max 1 live). Freeze ↔ unfreeze; replace (old → `replaced`, new card); cancel (terminal).
 - Authorization order of checks: amount → card status (frozen/canceled/replaced/requested) → account frozen → KYC → velocity (≥5 attempts in 10 min) → family rules → tier card limit → available balance (amount + fees).
 - Approved auth places a hold (amount + fees) for 7 days. Capture: partial releases the rest; over-capture allowed within tolerance — restaurants (MCC 5812-5814) +20%, fuel (5541/5542) up to $175; otherwise 0%. Expired auths can't be captured and their hold stops counting.
@@ -84,26 +93,33 @@ One live checking + one savings pocket per user, opened on KYC approval. Fake ro
 - Merchant refunds post once per network refund id and never exceed captured − refunded.
 
 ### Family cards (`family.ts`)
+
 - Spouse: active immediately, spends from owner's checking within per-txn/daily/monthly limits (per-txn ≤ daily ≤ monthly).
 - Teen: `pending_guardian_approval` until the owner approves; spends **only from an allowance pocket** (`family_allowance` ledger account) funded by owner top-ups; default MCC blocks gambling/alcohol/tobacco/adult. Max 5 members.
 
 ### Disputes (`disputes.ts`, Reg E style)
+
 Window 60 days after posting. Provisional credit due within 10 business days of notice; decision within 45 days (90 if the account is < 30 days old).
 `open → provisional_credited → won | lost`. Won keeps the credit (network chargeback: `card_settlement` → `dispute_receivable`). Lost reverses the provisional credit (can go negative). One open dispute per transaction.
 
 ### Fees & interest (`config.ts`, `interest.ts`)
+
 Fee schedule table = published fee page. Savings APY 4.00%: daily accrual = floor(balance × APY_bps × 10⁶ / (10,000 × 365)) micro-cents on end-of-day posted balance (≤ 0 accrues nothing). Monthly posting rounds (accrued + carry-in) to cents **half-to-even**; the remainder (|carry| ≤ ½ cent) carries to next month.
 
 ### Closure (`closure.ts`)
+
 Blocked by: pending holds (incl. teen allowance holds), negative balance, open disputes, `frozen_legal` (payout blocked), positive balance with no active name-matched linked bank. Otherwise: cancel all cards, pay out all pockets + allowance pockets in one ledger txn, close accounts, remove family members.
 
 ### Statements (`statements.ts`)
+
 Monthly statement = ledger lines for the account: opening + credits − debits = closing; running balance per line.
 
 ## Ledger accounts
+
 `customer_deposits` (party = account), `family_allowance` (party = member), `ach_clearing`, `card_settlement`, `fee_revenue`, `interest_expense`, `dispute_receivable`, `dispute_loss`, `ach_return_loss`, `closure_payout`.
 
 ## Supabase
+
 No hosted project yet (free-tier limit). Migrations in `supabase/migrations/` (schema, RLS, generated policy/fee seed, atomic money
 operations) are validated against a local Postgres 16 with a stub `auth` schema: `npm run db:check` (`scripts/ci/db_validate.sh` +
 `scripts/ci/db_checks.sql`, which also exercises every `harbor_*` operation: replay, guards, rollback, privileges).
@@ -117,9 +133,11 @@ grants staff roles by update after signup, and creates money through the `harbor
 to a fresh database and checks it (`scripts/ci/seed_checks.sql`), and a unit test keeps it in sync with `DEMO_USERS`.
 
 ## API
+
 See `docs/API.md`. Edge Function `api`; errors are `{error: {code, message, details?}}` with 4xx.
 
 ## UI (Vite + React + TS + Tailwind, light theme, blue accent)
+
 Pages: Sign in · Accounts (available vs posted vs on hold, KYC banner, pocket move, activity) · Link bank (fake Plaid, name match, cooling-off, direct deposit form) ·
 Transfers (ACH in, withdraw standard/instant with fee quote, P2P with step-up) · Cards (issue/freeze/replace/cancel, family members with limits/MCC blocks/approval/allowance, merchant simulator) ·
 Disputes · Statements · Fees & terms (published terms from the active policy + fee schedule) · Settings (close account) · Admin (KYC review, tier, freeze, ACH returns, disputes, jobs, ledger + trial balance).

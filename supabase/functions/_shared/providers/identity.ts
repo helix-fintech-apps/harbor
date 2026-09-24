@@ -1,7 +1,11 @@
 // Identity verification provider: fake (deterministic) + Stripe Identity (test mode).
 import { stripeRequest, type Env } from "./env.ts";
 
-export interface IdentitySession { sessionId: string; url?: string; status: string }
+export interface IdentitySession {
+  sessionId: string;
+  url?: string;
+  status: string;
+}
 
 export interface IdentityProvider {
   name: "fake" | "stripe_identity";
@@ -40,7 +44,10 @@ export class StripeIdentity implements IdentityProvider {
   name = "stripe_identity" as const;
   constructor(private env: Env) {}
   async start(userId: string): Promise<IdentitySession> {
-    const s = await stripeRequest(this.env, "POST", "/identity/verification_sessions", { type: "document", "metadata[user_id]": userId });
+    const s = await stripeRequest(this.env, "POST", "/identity/verification_sessions", {
+      type: "document",
+      "metadata[user_id]": userId,
+    });
     return { sessionId: s.id, url: s.url, status: s.status };
   }
   async status(sessionId: string): Promise<string> {

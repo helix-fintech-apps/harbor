@@ -24,9 +24,18 @@ export function accrueMonth(dailyEndBalancesCents: number[], policy: MoneyPolicy
   return dailyEndBalancesCents.reduce((acc, b) => acc + dailyAccrualMicro(b, policy), 0n);
 }
 
-export interface MonthlyPosting { postCents: number; carryMicro: bigint; ledger?: Txn }
+export interface MonthlyPosting {
+  postCents: number;
+  carryMicro: bigint;
+  ledger?: Txn;
+}
 
-export function planMonthlyInterest(p: { accountId: string; period: string; accruedMicro: bigint; carryInMicro: bigint }): MonthlyPosting {
+export function planMonthlyInterest(p: {
+  accountId: string;
+  period: string;
+  accruedMicro: bigint;
+  carryInMicro: bigint;
+}): MonthlyPosting {
   const total = p.accruedMicro + p.carryInMicro;
   const cents = divRoundHalfEven(total, MICRO_PER_CENT);
   const carry = total - cents * MICRO_PER_CENT;
@@ -35,6 +44,10 @@ export function planMonthlyInterest(p: { accountId: string; period: string; accr
   return {
     postCents,
     carryMicro: carry,
-    ledger: txn("interest_posting", [dr("interest_expense", postCents), cr("customer_deposits", postCents, p.accountId)], `${p.accountId}:${p.period}`),
+    ledger: txn(
+      "interest_posting",
+      [dr("interest_expense", postCents), cr("customer_deposits", postCents, p.accountId)],
+      `${p.accountId}:${p.period}`,
+    ),
   };
 }

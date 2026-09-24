@@ -16,7 +16,7 @@ export type CardStatus = "requested" | "active" | "frozen" | "canceled" | "repla
 
 export interface Card {
   id: string;
-  accountId: string;         // the owner's checking account
+  accountId: string; // the owner's checking account
   holderUserId: string;
   familyMemberId?: string;
   kind: CardKind;
@@ -37,7 +37,8 @@ export function canTransitionCard(from: CardStatus, to: CardStatus): boolean {
 }
 
 export function transitionCard(card: Card, to: CardStatus): Card {
-  if (!canTransitionCard(card.status, to)) throw new Error(`card: cannot go from ${card.status} to ${to}`);
+  if (!canTransitionCard(card.status, to))
+    throw new Error(`card: cannot go from ${card.status} to ${to}`);
   return { ...card, status: to };
 }
 
@@ -46,20 +47,45 @@ export function initialCardStatus(kind: CardKind): CardStatus {
   return kind === "virtual" ? "active" : "requested";
 }
 
-export function canIssueCard(kyc: KycState, kind: CardKind, existing: Card[], policy: MoneyPolicy): { ok: boolean; reason?: string } {
+export function canIssueCard(
+  kyc: KycState,
+  kind: CardKind,
+  existing: Card[],
+  policy: MoneyPolicy,
+): { ok: boolean; reason?: string } {
   if (!canMoveMoney(kyc)) return { ok: false, reason: "kyc_not_approved" };
-  const live = existing.filter((c) => c.status === "active" || c.status === "frozen" || c.status === "requested");
-  if (kind === "virtual" && live.filter((c) => c.kind === "virtual" && !c.familyMemberId).length >= policy.cards.maxActiveVirtualCards) {
+  const live = existing.filter(
+    (c) => c.status === "active" || c.status === "frozen" || c.status === "requested",
+  );
+  if (
+    kind === "virtual" &&
+    live.filter((c) => c.kind === "virtual" && !c.familyMemberId).length >=
+      policy.cards.maxActiveVirtualCards
+  ) {
     return { ok: false, reason: "too_many_virtual_cards" };
   }
-  if (kind === "physical" && live.some((c) => c.kind === "physical" && !c.familyMemberId)) return { ok: false, reason: "physical_card_exists" };
+  if (kind === "physical" && live.some((c) => c.kind === "physical" && !c.familyMemberId))
+    return { ok: false, reason: "physical_card_exists" };
   return { ok: true };
 }
 
 export type DeclineReason =
-  | "invalid_amount" | "account_frozen" | "card_frozen" | "card_canceled" | "card_inactive" | "kyc_not_approved"
-  | "velocity" | "daily_limit" | "monthly_limit" | "insufficient_funds"
-  | "member_inactive" | "mcc_blocked" | "per_txn_limit" | "member_daily_limit" | "member_monthly_limit" | "allowance_exceeded";
+  | "invalid_amount"
+  | "account_frozen"
+  | "card_frozen"
+  | "card_canceled"
+  | "card_inactive"
+  | "kyc_not_approved"
+  | "velocity"
+  | "daily_limit"
+  | "monthly_limit"
+  | "insufficient_funds"
+  | "member_inactive"
+  | "mcc_blocked"
+  | "per_txn_limit"
+  | "member_daily_limit"
+  | "member_monthly_limit"
+  | "allowance_exceeded";
 
 export interface AuthRequest {
   amountCents: number;
@@ -74,25 +100,31 @@ export interface AuthContext {
   accountStatus?: "open" | "frozen" | "closing" | "closed";
   ownerKyc: KycState;
   ownerTier: Tier;
-  ownerUsage: UsageEvent[];            // card_spend events on the owner's account (all cards)
-  availableCents: number;              // owner's checking available balance
-  recentAuthAttempts: Date[];          // this card
+  ownerUsage: UsageEvent[]; // card_spend events on the owner's account (all cards)
+  availableCents: number; // owner's checking available balance
+  recentAuthAttempts: Date[]; // this card
   member?: FamilyMember;
-  memberSpend?: UsageEvent[];          // card_spend events for this family member
-  allowanceAvailableCents?: number;    // teen allowance pocket
+  memberSpend?: UsageEvent[]; // card_spend events for this family member
+  allowanceAvailableCents?: number; // teen allowance pocket
   now: Date;
 }
 
 export type AuthDecision =
   | { approved: false; reason: DeclineReason }
   | {
-      approved: true; holdCents: number; feeCents: number; expiresAt: Date;
+      approved: true;
+      holdCents: number;
+      feeCents: number;
+      expiresAt: Date;
       funding: { account: LedgerAccount; party: string };
     };
 
 export function velocityExceeded(attempts: Date[], now: Date, policy: MoneyPolicy): boolean {
   const from = now.getTime() - policy.cards.velocity.windowMinutes * 60_000;
-  return attempts.filter((t) => t.getTime() > from && t.getTime() <= now.getTime()).length >= policy.cards.velocity.maxAuths;
+  return (
+    attempts.filter((t) => t.getTime() > from && t.getTime() <= now.getTime()).length >=
+    policy.cards.velocity.maxAuths
+  );
 }
 
 export function cardFees(req: AuthRequest, fees: FeeSchedule): number {
@@ -102,7 +134,12 @@ export function cardFees(req: AuthRequest, fees: FeeSchedule): number {
   return fee;
 }
 
-export function authorize(req: AuthRequest, ctx: AuthContext, policy: MoneyPolicy, fees: FeeSchedule): AuthDecision {
+export function authorize(
+  req: AuthRequest,
+  ctx: AuthContext,
+  policy: MoneyPolicy,
+  fees: FeeSchedule,
+): AuthDecision {
   const no = (reason: DeclineReason): AuthDecision => ({ approved: false, reason });
   if (!Number.isSafeInteger(req.amountCents) || req.amountCents <= 0) return no("invalid_amount");
   if (ctx.card.status === "frozen") return no("card_frozen");
@@ -115,7 +152,10 @@ export function authorize(req: AuthRequest, ctx: AuthContext, policy: MoneyPolic
   const feeCents = cardFees(req, fees);
   const need = req.amountCents + feeCents;
 
-  let funding: { account: LedgerAccount; party: string } = { account: "customer_deposits", party: ctx.card.accountId };
+  let funding: { account: LedgerAccount; party: string } = {
+    account: "customer_deposits",
+    party: ctx.card.accountId,
+  };
   if (ctx.card.familyMemberId) {
     if (!ctx.member) return no("member_inactive");
     const fam = checkFamilySpend(ctx.member, req.mcc, need, ctx.memberSpend ?? [], ctx.now);
@@ -126,18 +166,35 @@ export function authorize(req: AuthRequest, ctx: AuthContext, policy: MoneyPolic
     }
   }
 
-  const lim = checkLimit(ctx.ownerTier, "card_spend", req.amountCents, ctx.ownerUsage, ctx.now, policy);
+  const lim = checkLimit(
+    ctx.ownerTier,
+    "card_spend",
+    req.amountCents,
+    ctx.ownerUsage,
+    ctx.now,
+    policy,
+  );
   if (!lim.ok) return no(lim.reason!);
-  if (funding.account === "customer_deposits" && need > ctx.availableCents) return no("insufficient_funds");
+  if (funding.account === "customer_deposits" && need > ctx.availableCents)
+    return no("insufficient_funds");
 
-  return { approved: true, holdCents: need, feeCents, expiresAt: addDays(ctx.now, policy.cards.authValidityDays), funding };
+  return {
+    approved: true,
+    holdCents: need,
+    feeCents,
+    expiresAt: addDays(ctx.now, policy.cards.authValidityDays),
+    funding,
+  };
 }
 
 /** Maximum a merchant may capture against an authorization (tips / fuel tolerance). */
 export function maxCapture(authAmountCents: number, mcc: string, policy: MoneyPolicy): number {
   const g = mccGroup(mcc);
   if (g === "fuel") return Math.max(authAmountCents, policy.cards.fuelMaxCaptureCents);
-  const bps = policy.cards.overCaptureToleranceBps[g ?? "default"] ?? policy.cards.overCaptureToleranceBps.default ?? 0;
+  const bps =
+    policy.cards.overCaptureToleranceBps[g ?? "default"] ??
+    policy.cards.overCaptureToleranceBps.default ??
+    0;
   return authAmountCents + applyBps(authAmountCents, bps);
 }
 
@@ -156,26 +213,52 @@ export interface Authorization {
   funding: { account: LedgerAccount; party: string };
 }
 
-export interface CapturePlan { capturedCents: number; feeCents: number; releasedCents: number; ledger: Txn }
+export interface CapturePlan {
+  capturedCents: number;
+  feeCents: number;
+  releasedCents: number;
+  ledger: Txn;
+}
 
 /** Capture (settle) an auth. Partial capture releases the remainder; over-capture is allowed within tolerance. */
-export function planCapture(auth: Authorization, captureCents: number, now: Date, policy: MoneyPolicy, fees: FeeSchedule): CapturePlan {
-  if (auth.status !== "authorized") throw new Error(`cannot capture a ${auth.status} authorization`);
+export function planCapture(
+  auth: Authorization,
+  captureCents: number,
+  now: Date,
+  policy: MoneyPolicy,
+  fees: FeeSchedule,
+): CapturePlan {
+  if (auth.status !== "authorized")
+    throw new Error(`cannot capture a ${auth.status} authorization`);
   if (now.getTime() >= auth.expiresAt.getTime()) throw new Error("authorization expired");
-  if (!Number.isSafeInteger(captureCents) || captureCents <= 0) throw new Error("capture must be positive cents");
+  if (!Number.isSafeInteger(captureCents) || captureCents <= 0)
+    throw new Error("capture must be positive cents");
   const max = maxCapture(auth.amountCents, auth.mcc, policy);
   if (captureCents > max) throw new Error(`over-capture ${captureCents} exceeds tolerance ${max}`);
-  const feeCents = cardFees({ amountCents: captureCents, mcc: auth.mcc, merchant: "", foreign: auth.foreign, atmOutOfNetwork: auth.atmOutOfNetwork }, fees);
+  const feeCents = cardFees(
+    {
+      amountCents: captureCents,
+      mcc: auth.mcc,
+      merchant: "",
+      foreign: auth.foreign,
+      atmOutOfNetwork: auth.atmOutOfNetwork,
+    },
+    fees,
+  );
   const heldCents = auth.amountCents + auth.feeCents;
   return {
     capturedCents: captureCents,
     feeCents,
     releasedCents: Math.max(0, heldCents - captureCents - feeCents),
-    ledger: txn("card_capture", [
-      dr(auth.funding.account, captureCents + feeCents, auth.funding.party),
-      cr("card_settlement", captureCents),
-      cr("fee_revenue", feeCents),
-    ], auth.id),
+    ledger: txn(
+      "card_capture",
+      [
+        dr(auth.funding.account, captureCents + feeCents, auth.funding.party),
+        cr("card_settlement", captureCents),
+        cr("fee_revenue", feeCents),
+      ],
+      auth.id,
+    ),
   };
 }
 
@@ -185,16 +268,29 @@ export function isAuthExpired(auth: Authorization, now: Date): boolean {
 
 /** Merchant refund against a captured purchase. Each refund id posts at most once. The FX fee is not refunded. */
 export function planMerchantRefund(p: {
-  refundId: string; auth: Authorization; capturedCents: number; refundedSoFarCents: number;
-  amountCents: number; postedRefundIds: string[];
+  refundId: string;
+  auth: Authorization;
+  capturedCents: number;
+  refundedSoFarCents: number;
+  amountCents: number;
+  postedRefundIds: string[];
 }): { duplicate: true } | { duplicate: false; ledger: Txn } {
   if (p.postedRefundIds.includes(p.refundId)) return { duplicate: true };
   if (p.auth.status !== "captured") throw new Error("refund requires a captured purchase");
-  if (!Number.isSafeInteger(p.amountCents) || p.amountCents <= 0) throw new Error("refund must be positive cents");
-  if (p.refundedSoFarCents + p.amountCents > p.capturedCents) throw new Error("refund exceeds captured amount");
+  if (!Number.isSafeInteger(p.amountCents) || p.amountCents <= 0)
+    throw new Error("refund must be positive cents");
+  if (p.refundedSoFarCents + p.amountCents > p.capturedCents)
+    throw new Error("refund exceeds captured amount");
   return {
     duplicate: false,
-    ledger: txn("card_refund", [dr("card_settlement", p.amountCents), cr(p.auth.funding.account, p.amountCents, p.auth.funding.party)], p.refundId),
+    ledger: txn(
+      "card_refund",
+      [
+        dr("card_settlement", p.amountCents),
+        cr(p.auth.funding.account, p.amountCents, p.auth.funding.party),
+      ],
+      p.refundId,
+    ),
   };
 }
 

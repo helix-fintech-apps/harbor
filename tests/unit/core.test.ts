@@ -1,9 +1,39 @@
 import {
-  DEFAULT_POLICY as P, DEFAULT_FEES as F, divRoundHalfUp, divRoundHalfEven, applyBps, assertCents, formatBps,
-  addBusinessDays, txn, dr, cr, assertBalanced, partyBalance, trialBalance,
-  mapIdentityStatus, decideKyc, screenSanctions, canTransitionKyc, transitionKyc, canMoveMoney, canPayout, withVendorTimeout,
-  checkLimit, usage, abaChecksumValid, HARBOR_ROUTING_NUMBER, fakeAccountNumber, maskAccountNumber, balances,
-  withIdempotency, MemoryIdemStore, IdempotencyConflict, stableHash, type Hold, type Line,
+  DEFAULT_POLICY as P,
+  DEFAULT_FEES as F,
+  divRoundHalfUp,
+  divRoundHalfEven,
+  applyBps,
+  assertCents,
+  formatBps,
+  addBusinessDays,
+  txn,
+  dr,
+  cr,
+  assertBalanced,
+  partyBalance,
+  trialBalance,
+  mapIdentityStatus,
+  decideKyc,
+  screenSanctions,
+  canTransitionKyc,
+  transitionKyc,
+  canMoveMoney,
+  canPayout,
+  withVendorTimeout,
+  checkLimit,
+  usage,
+  abaChecksumValid,
+  HARBOR_ROUTING_NUMBER,
+  fakeAccountNumber,
+  maskAccountNumber,
+  balances,
+  withIdempotency,
+  MemoryIdemStore,
+  IdempotencyConflict,
+  stableHash,
+  type Hold,
+  type Line,
 } from "../../supabase/functions/_shared/domain/index.ts";
 
 const T = (s: string) => new Date(s);
@@ -20,7 +50,15 @@ describe("money helpers", () => {
     expect(divRoundHalfEven(-2_500_000n, 1_000_000n)).toBe(-2n);
   });
   it("formats basis points as the published percentages without floats", () => {
-    expect([400, 150, 300, 2_000, 5, 0, -150].map(formatBps)).toEqual(["4%", "1.50%", "3%", "20%", "0.05%", "0%", "-1.50%"]);
+    expect([400, 150, 300, 2_000, 5, 0, -150].map(formatBps)).toEqual([
+      "4%",
+      "1.50%",
+      "3%",
+      "20%",
+      "0.05%",
+      "0%",
+      "-1.50%",
+    ]);
     expect(() => formatBps(1.5)).toThrow();
   });
   it("applies basis points and rejects floats", () => {
@@ -30,23 +68,37 @@ describe("money helpers", () => {
   });
   it("adds business days skipping weekends and holidays", () => {
     // Fri 2026-09-25 + 3 business days = Wed 2026-09-30
-    expect(addBusinessDays(T("2026-09-25T15:00:00Z"), 3).toISOString()).toBe("2026-09-30T15:00:00.000Z");
+    expect(addBusinessDays(T("2026-09-25T15:00:00Z"), 3).toISOString()).toBe(
+      "2026-09-30T15:00:00.000Z",
+    );
     // Thu 2026-11-25 + 1 skips Thanksgiving (26th) -> Fri 27th
-    expect(addBusinessDays(T("2026-11-25T12:00:00Z"), 1, P.holidays).toISOString().slice(0, 10)).toBe("2026-11-27");
+    expect(
+      addBusinessDays(T("2026-11-25T12:00:00Z"), 1, P.holidays).toISOString().slice(0, 10),
+    ).toBe("2026-11-27");
     expect(() => addBusinessDays(T("2026-01-01"), -1)).toThrow();
   });
 });
 
 describe("ledger", () => {
   it("rejects unbalanced and non-integer txns", () => {
-    expect(() => txn("x", [dr("ach_clearing", 100), cr("customer_deposits", 99, "a")])).toThrow(/unbalanced/);
-    expect(() => assertBalanced({ kind: "x", lines: [{ account: "fee_revenue", debit: 1.5, credit: 0 }] })).toThrow();
-    expect(() => txn("x", [dr("ach_clearing", 0), cr("customer_deposits", 0, "a")])).toThrow(/empty/);
+    expect(() => txn("x", [dr("ach_clearing", 100), cr("customer_deposits", 99, "a")])).toThrow(
+      /unbalanced/,
+    );
+    expect(() =>
+      assertBalanced({ kind: "x", lines: [{ account: "fee_revenue", debit: 1.5, credit: 0 }] }),
+    ).toThrow();
+    expect(() => txn("x", [dr("ach_clearing", 0), cr("customer_deposits", 0, "a")])).toThrow(
+      /empty/,
+    );
   });
   it("derives party balances and a zero trial balance", () => {
     const lines: Line[] = [
       ...txn("in", [dr("ach_clearing", 5000), cr("customer_deposits", 5000, "acct")]).lines,
-      ...txn("out", [dr("customer_deposits", 1200, "acct"), cr("ach_clearing", 1000), cr("fee_revenue", 200)]).lines,
+      ...txn("out", [
+        dr("customer_deposits", 1200, "acct"),
+        cr("ach_clearing", 1000),
+        cr("fee_revenue", 200),
+      ]).lines,
     ];
     expect(partyBalance(lines, "customer_deposits", "acct")).toBe(3800);
     expect(trialBalance(lines)).toBe(0);
@@ -69,9 +121,16 @@ describe("KYC", () => {
   it("routes requires_input to review, failures to rejected, sanctions hits to review/freeze", () => {
     expect(decideKyc(mapIdentityStatus("requires_input"), clear).state).toBe("needs_review");
     expect(decideKyc(mapIdentityStatus("canceled"), clear).state).toBe("rejected");
-    expect(decideKyc({ kind: "verified" }, { kind: "potential_match", entry: "x", scoreBps: 9000 }).state).toBe("needs_review");
-    expect(decideKyc({ kind: "verified" }, { kind: "confirmed_match", entry: "x" }).state).toBe("frozen_legal");
-    expect(decideKyc({ kind: "timeout" }, { kind: "confirmed_match", entry: "x" }).state).toBe("frozen_legal");
+    expect(
+      decideKyc({ kind: "verified" }, { kind: "potential_match", entry: "x", scoreBps: 9000 })
+        .state,
+    ).toBe("needs_review");
+    expect(decideKyc({ kind: "verified" }, { kind: "confirmed_match", entry: "x" }).state).toBe(
+      "frozen_legal",
+    );
+    expect(decideKyc({ kind: "timeout" }, { kind: "confirmed_match", entry: "x" }).state).toBe(
+      "frozen_legal",
+    );
   });
   it("screens the fake sanctions list with normalization and fuzzy matching", () => {
     expect(screenSanctions("OLEG embargo", P).kind).toBe("confirmed_match");
@@ -86,7 +145,15 @@ describe("KYC", () => {
     expect(canTransitionKyc("approved", "pending")).toBe(false);
     expect(() => transitionKyc("suspended", "unverified")).toThrow();
     expect(canMoveMoney("approved")).toBe(true);
-    for (const s of ["unverified", "pending", "needs_review", "rejected", "suspended", "frozen_legal"] as const) expect(canMoveMoney(s)).toBe(false);
+    for (const s of [
+      "unverified",
+      "pending",
+      "needs_review",
+      "rejected",
+      "suspended",
+      "frozen_legal",
+    ] as const)
+      expect(canMoveMoney(s)).toBe(false);
     expect(canPayout("frozen_legal")).toBe(false);
   });
   it("turns a slow vendor into a timeout", async () => {
@@ -98,7 +165,11 @@ describe("KYC", () => {
 
 describe("tier limits", () => {
   const now = T("2026-09-24T18:00:00Z");
-  const ev = (iso: string, amountCents: number) => ({ at: T(iso), amountCents, kind: "transfer_out" as const });
+  const ev = (iso: string, amountCents: number) => ({
+    at: T(iso),
+    amountCents,
+    kind: "transfer_out" as const,
+  });
   it("allows exactly the daily limit and declines one cent over (tier1 $1,000/day)", () => {
     const used = [ev("2026-09-24T01:00:00Z", 60_000)];
     expect(checkLimit("tier1", "transfer_out", 40_000, used, now, P).ok).toBe(true);
@@ -134,14 +205,50 @@ describe("accounts and balances", () => {
   });
   it("available = posted - active holds; expired holds don't count", () => {
     const now = T("2026-09-24T00:00:00Z");
-    const lines = txn("in", [dr("ach_clearing", 10_000), cr("customer_deposits", 10_000, "a")]).lines;
+    const lines = txn("in", [
+      dr("ach_clearing", 10_000),
+      cr("customer_deposits", 10_000, "a"),
+    ]).lines;
     const holds: Hold[] = [
-      { id: "h1", accountId: "a", kind: "ach_in", amountCents: 6_000, status: "active", createdAt: now },
-      { id: "h2", accountId: "a", kind: "card_auth", amountCents: 1_000, status: "active", createdAt: now, expiresAt: T("2026-09-23T00:00:00Z") },
-      { id: "h3", accountId: "a", kind: "card_auth", amountCents: 500, status: "released", createdAt: now },
-      { id: "h4", accountId: "b", kind: "card_auth", amountCents: 700, status: "active", createdAt: now },
+      {
+        id: "h1",
+        accountId: "a",
+        kind: "ach_in",
+        amountCents: 6_000,
+        status: "active",
+        createdAt: now,
+      },
+      {
+        id: "h2",
+        accountId: "a",
+        kind: "card_auth",
+        amountCents: 1_000,
+        status: "active",
+        createdAt: now,
+        expiresAt: T("2026-09-23T00:00:00Z"),
+      },
+      {
+        id: "h3",
+        accountId: "a",
+        kind: "card_auth",
+        amountCents: 500,
+        status: "released",
+        createdAt: now,
+      },
+      {
+        id: "h4",
+        accountId: "b",
+        kind: "card_auth",
+        amountCents: 700,
+        status: "active",
+        createdAt: now,
+      },
     ];
-    expect(balances(lines, holds, "a", now)).toEqual({ postedCents: 10_000, holdsCents: 6_000, availableCents: 4_000 });
+    expect(balances(lines, holds, "a", now)).toEqual({
+      postedCents: 10_000,
+      holdsCents: 6_000,
+      availableCents: 4_000,
+    });
   });
 });
 
@@ -160,7 +267,9 @@ describe("idempotency", () => {
   it("rejects key reuse with a different body; key order does not matter", async () => {
     const store = new MemoryIdemStore();
     await withIdempotency(store, "k", { a: 1, b: 2 }, async () => ({ status: 200, body: 1 }));
-    await expect(withIdempotency(store, "k", { a: 1, b: 3 }, async () => ({ status: 200, body: 2 }))).rejects.toBeInstanceOf(IdempotencyConflict);
+    await expect(
+      withIdempotency(store, "k", { a: 1, b: 3 }, async () => ({ status: 200, body: 2 })),
+    ).rejects.toBeInstanceOf(IdempotencyConflict);
     expect(stableHash({ a: 1, b: 2 })).toBe(stableHash({ b: 2, a: 1 }));
   });
   it("does not cache 5xx failures", async () => {

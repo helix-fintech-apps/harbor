@@ -20,7 +20,10 @@ export function abaChecksumValid(routing: string): boolean {
 /** Deterministic fake 12-digit account number from a seed (e.g. account uuid), prefixed 8800. */
 export function fakeAccountNumber(seed: string): string {
   let h = 2166136261;
-  for (let i = 0; i < seed.length; i++) { h ^= seed.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
   return "8800" + String(h).padStart(10, "0").slice(-8);
 }
 
@@ -38,7 +41,7 @@ export interface Hold {
   amountCents: number;
   status: HoldStatus;
   createdAt: Date;
-  expiresAt?: Date;       // card auths expire; ACH holds release at settlement
+  expiresAt?: Date; // card auths expire; ACH holds release at settlement
   releaseAt?: Date;
 }
 
@@ -49,10 +52,16 @@ export function holdIsActive(h: Hold, now: Date): boolean {
 }
 
 export function activeHoldsTotal(holds: Hold[], accountId: string, now: Date): number {
-  return holds.filter((h) => h.accountId === accountId && holdIsActive(h, now)).reduce((a, h) => a + h.amountCents, 0);
+  return holds
+    .filter((h) => h.accountId === accountId && holdIsActive(h, now))
+    .reduce((a, h) => a + h.amountCents, 0);
 }
 
-export interface Balances { postedCents: number; availableCents: number; holdsCents: number }
+export interface Balances {
+  postedCents: number;
+  availableCents: number;
+  holdsCents: number;
+}
 
 export function balances(lines: Line[], holds: Hold[], accountId: string, now: Date): Balances {
   const postedCents = partyBalance(lines, "customer_deposits", accountId);

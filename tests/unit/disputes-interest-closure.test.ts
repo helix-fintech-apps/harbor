@@ -1,25 +1,53 @@
 import {
-  DEFAULT_POLICY as P, disputeTimeline, openDispute, planProvisionalCredit, provisionalCreditOverdue, resolveDispute,
-  dailyAccrualMicro, accrueMonth, planMonthlyInterest, closureBlocks, planClosure, buildStatement, periodBounds,
-  partyBalance, type ClosureInput, type LinkedBank,
+  DEFAULT_POLICY as P,
+  disputeTimeline,
+  openDispute,
+  planProvisionalCredit,
+  provisionalCreditOverdue,
+  resolveDispute,
+  dailyAccrualMicro,
+  accrueMonth,
+  planMonthlyInterest,
+  closureBlocks,
+  planClosure,
+  buildStatement,
+  periodBounds,
+  partyBalance,
+  type ClosureInput,
+  type LinkedBank,
 } from "../../supabase/functions/_shared/domain/index.ts";
 
 const T = (s: string) => new Date(s);
 const now = T("2026-09-24T18:00:00Z");
 
 describe("disputes (Reg E style)", () => {
-  const base = { id: "d1", authId: "a1", accountId: "chk", amountCents: 4_000, capturedCents: 5_000, refundedCents: 0, postedAt: T("2026-09-10T00:00:00Z"), now, accountOpenedAt: T("2026-01-01T00:00:00Z"), existingOpen: false };
+  const base = {
+    id: "d1",
+    authId: "a1",
+    accountId: "chk",
+    amountCents: 4_000,
+    capturedCents: 5_000,
+    refundedCents: 0,
+    postedAt: T("2026-09-10T00:00:00Z"),
+    now,
+    accountOpenedAt: T("2026-01-01T00:00:00Z"),
+    existingOpen: false,
+  };
   it("provisional credit due in 10 business days; resolution in 45 days (90 for new accounts)", () => {
     const tl = disputeTimeline(now, T("2026-01-01T00:00:00Z"), P);
     expect(tl.provisionalCreditDueAt.toISOString().slice(0, 10)).toBe("2026-10-08"); // Thu + 10 business days, skipping two weekends
     expect(tl.resolutionDueAt.toISOString().slice(0, 10)).toBe("2026-11-08");
-    expect(disputeTimeline(now, T("2026-09-10T00:00:00Z"), P).resolutionDueAt.toISOString().slice(0, 10)).toBe("2026-12-23");
+    expect(
+      disputeTimeline(now, T("2026-09-10T00:00:00Z"), P).resolutionDueAt.toISOString().slice(0, 10),
+    ).toBe("2026-12-23");
   });
   it("validates window, amount and duplicates", () => {
     expect(() => openDispute({ ...base, amountCents: 5_001 }, P)).toThrow(/exceeds/);
     expect(() => openDispute({ ...base, refundedCents: 2_000 }, P)).toThrow(/exceeds/);
     expect(() => openDispute({ ...base, existingOpen: true }, P)).toThrow();
-    expect(() => openDispute({ ...base, postedAt: T("2026-07-01T00:00:00Z") }, P)).toThrow(/window/);
+    expect(() => openDispute({ ...base, postedAt: T("2026-07-01T00:00:00Z") }, P)).toThrow(
+      /window/,
+    );
     expect(openDispute({ ...base, postedAt: T("2026-07-26T18:00:00Z") }, P).status).toBe("open"); // exactly 60 days
   });
   it("provisional credit then won keeps the credit; lost reverses it", () => {
@@ -36,14 +64,18 @@ describe("disputes (Reg E style)", () => {
   });
   it("won without provisional credit credits the customer; lost without credit posts nothing", () => {
     const d = openDispute(base, P);
-    expect(partyBalance(resolveDispute(d, "won").ledger!.lines, "customer_deposits", "chk")).toBe(4_000);
+    expect(partyBalance(resolveDispute(d, "won").ledger!.lines, "customer_deposits", "chk")).toBe(
+      4_000,
+    );
     expect(resolveDispute(d, "lost").ledger).toBeUndefined();
   });
   it("flags overdue provisional credit", () => {
     const d = openDispute(base, P);
     expect(provisionalCreditOverdue(d, T("2026-10-08T18:00:00Z"))).toBe(false);
     expect(provisionalCreditOverdue(d, T("2026-10-08T18:00:01Z"))).toBe(true);
-    expect(provisionalCreditOverdue(planProvisionalCredit(d).dispute, T("2026-12-01T00:00:00Z"))).toBe(false);
+    expect(
+      provisionalCreditOverdue(planProvisionalCredit(d).dispute, T("2026-12-01T00:00:00Z")),
+    ).toBe(false);
   });
 });
 
@@ -58,30 +90,94 @@ describe("savings interest", () => {
   it("posts monthly with banker's rounding and carries the remainder", () => {
     const accrued = accrueMonth(Array(30).fill(1_000_000), P); // 3,287,671,230 micro
     expect(accrued).toBe(3_287_671_230n);
-    const m = planMonthlyInterest({ accountId: "sav", period: "2026-09", accruedMicro: accrued, carryInMicro: 0n });
+    const m = planMonthlyInterest({
+      accountId: "sav",
+      period: "2026-09",
+      accruedMicro: accrued,
+      carryInMicro: 0n,
+    });
     expect(m.postCents).toBe(3_288);
     expect(m.carryMicro).toBe(-328_770n);
     expect(partyBalance(m.ledger!.lines, "customer_deposits", "sav")).toBe(3_288);
   });
   it("exact half cents round to even", () => {
-    expect(planMonthlyInterest({ accountId: "s", period: "p", accruedMicro: 2_500_000n, carryInMicro: 0n }).postCents).toBe(2);
-    expect(planMonthlyInterest({ accountId: "s", period: "p", accruedMicro: 3_500_000n, carryInMicro: 0n }).postCents).toBe(4);
+    expect(
+      planMonthlyInterest({
+        accountId: "s",
+        period: "p",
+        accruedMicro: 2_500_000n,
+        carryInMicro: 0n,
+      }).postCents,
+    ).toBe(2);
+    expect(
+      planMonthlyInterest({
+        accountId: "s",
+        period: "p",
+        accruedMicro: 3_500_000n,
+        carryInMicro: 0n,
+      }).postCents,
+    ).toBe(4);
   });
   it("sub-cent months post nothing and carry everything forward", () => {
-    const m = planMonthlyInterest({ accountId: "s", period: "p", accruedMicro: 400_000n, carryInMicro: 0n });
+    const m = planMonthlyInterest({
+      accountId: "s",
+      period: "p",
+      accruedMicro: 400_000n,
+      carryInMicro: 0n,
+    });
     expect(m.postCents).toBe(0);
     expect(m.carryMicro).toBe(400_000n);
     expect(m.ledger).toBeUndefined();
-    expect(planMonthlyInterest({ accountId: "s", period: "p", accruedMicro: 400_000n, carryInMicro: m.carryMicro }).postCents).toBe(1);
+    expect(
+      planMonthlyInterest({
+        accountId: "s",
+        period: "p",
+        accruedMicro: 400_000n,
+        carryInMicro: m.carryMicro,
+      }).postCents,
+    ).toBe(1);
   });
 });
 
 describe("account closure", () => {
-  const bank: LinkedBank = { id: "b", userId: "u", institution: "x", mask: "0000", ownerNames: [], nameMatched: true, linkedAt: T("2026-01-01"), status: "active" };
+  const bank: LinkedBank = {
+    id: "b",
+    userId: "u",
+    institution: "x",
+    mask: "0000",
+    ownerNames: [],
+    nameMatched: true,
+    linkedAt: T("2026-01-01"),
+    status: "active",
+  };
   const input = (over: Partial<ClosureInput> = {}): ClosureInput => ({
-    kyc: "approved", accountStatus: "open", pockets: [{ accountId: "chk", postedCents: 7_000 }, { accountId: "sav", postedCents: 3_000 }],
-    activeHoldsCents: 0, openDisputes: 0, linkedBank: bank,
-    cards: [{ id: "c1", accountId: "chk", holderUserId: "u", kind: "virtual", status: "active", last4: "1" }, { id: "c2", accountId: "chk", holderUserId: "u", kind: "virtual", status: "canceled", last4: "2" }],
+    kyc: "approved",
+    accountStatus: "open",
+    pockets: [
+      { accountId: "chk", postedCents: 7_000 },
+      { accountId: "sav", postedCents: 3_000 },
+    ],
+    activeHoldsCents: 0,
+    openDisputes: 0,
+    linkedBank: bank,
+    cards: [
+      {
+        id: "c1",
+        accountId: "chk",
+        holderUserId: "u",
+        kind: "virtual",
+        status: "active",
+        last4: "1",
+      },
+      {
+        id: "c2",
+        accountId: "chk",
+        holderUserId: "u",
+        kind: "virtual",
+        status: "canceled",
+        last4: "2",
+      },
+    ],
     ...over,
   });
   it("pays out all pockets and cancels live cards", () => {
@@ -92,19 +188,34 @@ describe("account closure", () => {
   });
   it("blocks on pending holds, negative balance, open disputes, sanctions freeze, missing bank", () => {
     expect(closureBlocks(input({ activeHoldsCents: 1 }))).toContain("pending_holds");
-    expect(closureBlocks(input({ pockets: [{ accountId: "chk", postedCents: -1 }, { accountId: "sav", postedCents: 5_000 }] }))).toContain("negative_balance");
+    expect(
+      closureBlocks(
+        input({
+          pockets: [
+            { accountId: "chk", postedCents: -1 },
+            { accountId: "sav", postedCents: 5_000 },
+          ],
+        }),
+      ),
+    ).toContain("negative_balance");
     expect(closureBlocks(input({ openDisputes: 1 }))).toContain("open_disputes");
     expect(closureBlocks(input({ kyc: "frozen_legal" }))).toContain("payout_blocked");
     expect(closureBlocks(input({ linkedBank: null }))).toContain("no_linked_bank");
     expect(() => planClosure(input({ kyc: "frozen_legal" }), "x")).toThrow(/payout_blocked/);
   });
   it("zero balance closes without a bank or payout", () => {
-    const p = planClosure(input({ linkedBank: null, pockets: [{ accountId: "chk", postedCents: 0 }] }), "x");
+    const p = planClosure(
+      input({ linkedBank: null, pockets: [{ accountId: "chk", postedCents: 0 }] }),
+      "x",
+    );
     expect(p.payoutCents).toBe(0);
     expect(p.ledger).toBeUndefined();
   });
   it("includes teen allowance pockets in the payout", () => {
-    expect(planClosure(input({ allowancePockets: [{ memberId: "m1", postedCents: 500 }] }), "x").payoutCents).toBe(10_500);
+    expect(
+      planClosure(input({ allowancePockets: [{ memberId: "m1", postedCents: 500 }] }), "x")
+        .payoutCents,
+    ).toBe(10_500);
   });
 });
 

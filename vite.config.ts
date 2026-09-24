@@ -6,7 +6,9 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
-      "@domain": fileURLToPath(new URL("./supabase/functions/_shared/domain/index.ts", import.meta.url)),
+      "@domain": fileURLToPath(
+        new URL("./supabase/functions/_shared/domain/index.ts", import.meta.url),
+      ),
       "@shared": fileURLToPath(new URL("./supabase/functions/_shared", import.meta.url)),
     },
   },

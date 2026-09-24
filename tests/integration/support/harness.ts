@@ -4,7 +4,14 @@
 //   - postgres: SupabaseStore -> harbor_* SQL functions, when HARBOR_PG_URL points at a database
 //               with scripts/ci/auth_stub.sql + supabase/migrations applied (scripts/ci/with_pg.sh).
 import pg from "pg";
-import { createApp, createMemoryApp, demoClock, seedDemo, DEMO_USERS, type App } from "../../../supabase/functions/_shared/app/demo.ts";
+import {
+  createApp,
+  createMemoryApp,
+  demoClock,
+  seedDemo,
+  DEMO_USERS,
+  type App,
+} from "../../../supabase/functions/_shared/app/demo.ts";
 import { SupabaseStore } from "../../../supabase/functions/_shared/app/store.ts";
 import { PgSupabase } from "./pg-supabase.ts";
 
@@ -25,7 +32,12 @@ const memoryHarness: Harness = {
   async create(start) {
     const app = createMemoryApp(start, { kycTimeoutMs: 20 });
     await seedDemo(app);
-    return { ...app, addUser: async (id, email, legalName) => { await app.service.createProfile(id, email, legalName); } };
+    return {
+      ...app,
+      addUser: async (id, email, legalName) => {
+        await app.service.createProfile(id, email, legalName);
+      },
+    };
   },
   async close() {},
 };
@@ -37,12 +49,20 @@ function postgresHarness(url: string): Harness {
     async create(start) {
       pool ??= new pg.Pool({ connectionString: url, max: 6 });
       const db = pool;
-      const tables = (await db.query("select tablename from pg_tables where schemaname = 'public' and tablename not in ('money_policies', 'fee_schedules')")).rows.map((r) => `public."${r.tablename}"`);
+      const tables = (
+        await db.query(
+          "select tablename from pg_tables where schemaname = 'public' and tablename not in ('money_policies', 'fee_schedules')",
+        )
+      ).rows.map((r) => `public."${r.tablename}"`);
       await db.query(`truncate ${tables.join(", ")}, auth.users restart identity cascade`);
       // Signup = an auth.users row; the on_auth_user_created trigger creates the customer profile.
       const addUser = async (id: string, email: string, legalName: string, role = "customer") => {
-        await db.query("insert into auth.users (id, email, raw_user_meta_data) values ($1, $2, $3)", [id, email, JSON.stringify({ legal_name: legalName })]);
-        if (role !== "customer") await db.query("update public.profiles set role = $2 where id = $1", [id, role]);
+        await db.query(
+          "insert into auth.users (id, email, raw_user_meta_data) values ($1, $2, $3)",
+          [id, email, JSON.stringify({ legal_name: legalName })],
+        );
+        if (role !== "customer")
+          await db.query("update public.profiles set role = $2 where id = $1", [id, role]);
       };
       for (const u of DEMO_USERS) await addUser(u.id, u.email, u.legalName, u.role);
       const clock = demoClock(start);

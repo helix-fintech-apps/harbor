@@ -3,7 +3,12 @@ import { stripeRequest, type Env } from "./env.ts";
 
 export interface CardIssuer {
   name: "fake" | "stripe_issuing";
-  createCard(p: { userId: string; legalName: string; kind: "virtual" | "physical"; cardId: string }): Promise<{ providerCardId: string; last4: string }>;
+  createCard(p: {
+    userId: string;
+    legalName: string;
+    kind: "virtual" | "physical";
+    cardId: string;
+  }): Promise<{ providerCardId: string; last4: string }>;
   setStatus(providerCardId: string, status: "active" | "inactive" | "canceled"): Promise<void>;
 }
 
@@ -25,15 +30,23 @@ export class StripeIssuing implements CardIssuer {
     let ch = this.holders.get(p.userId);
     if (!ch) {
       const h = await stripeRequest(this.env, "POST", "/issuing/cardholders", {
-        type: "individual", name: p.legalName, "metadata[user_id]": p.userId,
-        "billing[address][line1]": "1 Test St", "billing[address][city]": "San Francisco",
-        "billing[address][state]": "CA", "billing[address][postal_code]": "94111", "billing[address][country]": "US",
+        type: "individual",
+        name: p.legalName,
+        "metadata[user_id]": p.userId,
+        "billing[address][line1]": "1 Test St",
+        "billing[address][city]": "San Francisco",
+        "billing[address][state]": "CA",
+        "billing[address][postal_code]": "94111",
+        "billing[address][country]": "US",
       });
       ch = h.id as string;
       this.holders.set(p.userId, ch);
     }
     const c = await stripeRequest(this.env, "POST", "/issuing/cards", {
-      cardholder: ch, currency: "usd", type: p.kind, status: p.kind === "virtual" ? "active" : "inactive",
+      cardholder: ch,
+      currency: "usd",
+      type: p.kind,
+      status: p.kind === "virtual" ? "active" : "inactive",
     });
     return { providerCardId: c.id as string, last4: c.last4 as string };
   }

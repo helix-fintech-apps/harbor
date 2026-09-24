@@ -13,62 +13,67 @@ write is refused as a whole and the endpoint returns its usual error for that ru
 recorded and returned as a decline (`insufficient_funds` / `allowance_exceeded`).
 
 ## Public
-| Method + path | Does |
-|---|---|
-| GET /fees | Published terms: `{fees: FeeSchedule, policy: MoneyPolicy}` (active versions) |
+
+| Method + path | Does                                                                          |
+| ------------- | ----------------------------------------------------------------------------- |
+| GET /fees     | Published terms: `{fees: FeeSchedule, policy: MoneyPolicy}` (active versions) |
 
 ## Customer
-| Method + path | Body | Does / notable errors |
-|---|---|---|
-| GET /me | — | Profile (KYC, tier), limits + usage, accounts with `postedCents/holdsCents/availableCents`, banks (name match, `coolingOffUntil`), cards, family (+ allowance), transfers, card authorizations, disputes |
-| POST /kyc/start | — | Identity (provider) + sanctions screen → state. Timeout/unknown → `pending`. On approval opens checking + savings. 409 `kyc_already_decided` |
-| POST /kyc/refresh | `{sessionId?}` | Re-poll a pending identity session |
-| POST /banks/link-token | — | Plaid link token (`link-sandbox-…`) |
-| POST /banks/exchange | `{publicToken}` | Exchange → `/auth/get` + `/identity/get` → linked bank with `nameMatched` |
-| POST /banks/:id/remove | — | Unlink |
-| POST /direct-deposit | `{employerName, allocation:{kind:"full"|"percent"|"fixed",…}, signatureName, accountKind?}` | Validate + record switch form (422 `invalid_form`) |
-| GET /transfers/fee-quote?amountCents=&speed= | — | Fee preview from the active fee schedule |
-| POST /transfers/ach-in | `{bankId, amountCents}` | ACH pull: posts now, hold until `settleAt` (3 business days). 422 `bank_name_mismatch`, `daily_limit` |
-| POST /transfers/ach-out | `{bankId, amountCents, speed:"standard"|"instant"}` | Withdraw. 422 `cooling_off`, `insufficient_funds`, `daily_limit`, `monthly_limit`, `bank_name_mismatch`; 403 `kyc_not_approved`, `payout_blocked` |
-| POST /transfers/p2p | `{recipientEmail, amountCents, stepUpCode?}` | Pay a Harbor member. 422 `step_up_required` (new payee), `recipient_unavailable`, `self_transfer`, `below_minimum`, limits |
-| POST /transfers/pocket | `{from, to, amountCents}` | Checking ↔ savings |
-| POST /cards | `{kind:"virtual"|"physical", familyMemberId?}` | Issue (virtual active now; physical `requested`). 409 `too_many_virtual_cards`, `physical_card_exists`, `member_has_card` |
-| POST /cards/:id/freeze · /unfreeze · /activate · /cancel · /replace | — | Card lifecycle (owner only). 409 `invalid_transition` |
-| POST /family | `{name, kind:"spouse"|"teen", limits:{perTxnCents, dailyCents, monthlyCents}, blockedMccGroups?, memberEmail?}` | Add member (teen → `pending_guardian_approval`) |
-| POST /family/:id/approve | — | Guardian (owner) approval of a teen |
-| POST /family/:id/limits | `{limits?, blockedMccGroups?}` | Update limits / MCC blocks (teen default blocks always kept) |
-| POST /family/:id/allowance | `{amountCents}` | Top up teen allowance from checking |
-| POST /disputes | `{authorizationId, amountCents, reason}` | Open a dispute on a captured purchase (window, amount, one-open rules) |
-| GET /statements?accountId=&period=YYYY-MM | — | Statement from the ledger: opening, credits, debits, closing, entries with running balance |
-| POST /accounts/close | `{bankId?}` | Close: 409 `closure_blocked` with `details` = blocks (`pending_holds`, `negative_balance`, `open_disputes`, `payout_blocked`, `no_linked_bank`); 409 `closure_state_changed` if money moved while closing (retry) |
+
+| Method + path                                                       | Body                                         | Does / notable errors                                                                                                                                                                                             |
+| ------------------------------------------------------------------- | -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET /me                                                             | —                                            | Profile (KYC, tier), limits + usage, accounts with `postedCents/holdsCents/availableCents`, banks (name match, `coolingOffUntil`), cards, family (+ allowance), transfers, card authorizations, disputes          |
+| POST /kyc/start                                                     | —                                            | Identity (provider) + sanctions screen → state. Timeout/unknown → `pending`. On approval opens checking + savings. 409 `kyc_already_decided`                                                                      |
+| POST /kyc/refresh                                                   | `{sessionId?}`                               | Re-poll a pending identity session                                                                                                                                                                                |
+| POST /banks/link-token                                              | —                                            | Plaid link token (`link-sandbox-…`)                                                                                                                                                                               |
+| POST /banks/exchange                                                | `{publicToken}`                              | Exchange → `/auth/get` + `/identity/get` → linked bank with `nameMatched`                                                                                                                                         |
+| POST /banks/:id/remove                                              | —                                            | Unlink                                                                                                                                                                                                            |
+| POST /direct-deposit                                                | `{employerName, allocation:{kind:"full"      | "percent"                                                                                                                                                                                                         | "fixed",…}, signatureName, accountKind?}`                                                                                                         | Validate + record switch form (422 `invalid_form`) |
+| GET /transfers/fee-quote?amountCents=&speed=                        | —                                            | Fee preview from the active fee schedule                                                                                                                                                                          |
+| POST /transfers/ach-in                                              | `{bankId, amountCents}`                      | ACH pull: posts now, hold until `settleAt` (3 business days). 422 `bank_name_mismatch`, `daily_limit`                                                                                                             |
+| POST /transfers/ach-out                                             | `{bankId, amountCents, speed:"standard"      | "instant"}`                                                                                                                                                                                                       | Withdraw. 422 `cooling_off`, `insufficient_funds`, `daily_limit`, `monthly_limit`, `bank_name_mismatch`; 403 `kyc_not_approved`, `payout_blocked` |
+| POST /transfers/p2p                                                 | `{recipientEmail, amountCents, stepUpCode?}` | Pay a Harbor member. 422 `step_up_required` (new payee), `recipient_unavailable`, `self_transfer`, `below_minimum`, limits                                                                                        |
+| POST /transfers/pocket                                              | `{from, to, amountCents}`                    | Checking ↔ savings                                                                                                                                                                                                |
+| POST /cards                                                         | `{kind:"virtual"                             | "physical", familyMemberId?}`                                                                                                                                                                                     | Issue (virtual active now; physical `requested`). 409 `too_many_virtual_cards`, `physical_card_exists`, `member_has_card`                         |
+| POST /cards/:id/freeze · /unfreeze · /activate · /cancel · /replace | —                                            | Card lifecycle (owner only). 409 `invalid_transition`                                                                                                                                                             |
+| POST /family                                                        | `{name, kind:"spouse"                        | "teen", limits:{perTxnCents, dailyCents, monthlyCents}, blockedMccGroups?, memberEmail?}`                                                                                                                         | Add member (teen → `pending_guardian_approval`)                                                                                                   |
+| POST /family/:id/approve                                            | —                                            | Guardian (owner) approval of a teen                                                                                                                                                                               |
+| POST /family/:id/limits                                             | `{limits?, blockedMccGroups?}`               | Update limits / MCC blocks (teen default blocks always kept)                                                                                                                                                      |
+| POST /family/:id/allowance                                          | `{amountCents}`                              | Top up teen allowance from checking                                                                                                                                                                               |
+| POST /disputes                                                      | `{authorizationId, amountCents, reason}`     | Open a dispute on a captured purchase (window, amount, one-open rules)                                                                                                                                            |
+| GET /statements?accountId=&period=YYYY-MM                           | —                                            | Statement from the ledger: opening, credits, debits, closing, entries with running balance                                                                                                                        |
+| POST /accounts/close                                                | `{bankId?}`                                  | Close: 409 `closure_blocked` with `details` = blocks (`pending_holds`, `negative_balance`, `open_disputes`, `payout_blocked`, `no_linked_bank`); 409 `closure_state_changed` if money moved while closing (retry) |
 
 ## Card network simulator (fake issuer only; 404 when Stripe Issuing is configured)
-| Method + path | Body | Does |
-|---|---|---|
-| POST /sim/cards/:id/authorize | `{amountCents, mcc, merchant, foreign?, atmOutOfNetwork?}` | `{approved, reason?, holdCents, feeCents, expiresAt, authorizationId}`; decline reasons: `card_frozen`, `card_canceled`, `card_inactive`, `account_frozen`, `kyc_not_approved`, `velocity`, `daily_limit`, `monthly_limit`, `insufficient_funds`, `member_inactive`, `mcc_blocked`, `per_txn_limit`, `member_daily_limit`, `member_monthly_limit`, `allowance_exceeded` |
-| POST /sim/authorizations/:id/capture | `{amountCents}` | Settle (partial or within over-capture tolerance). 422 `capture_rejected` |
-| POST /sim/authorizations/:id/refund | `{refundId, amountCents}` | Merchant refund, once per `refundId` (`duplicate: true` on repeat) |
+
+| Method + path                        | Body                                                       | Does                                                                                                                                                                                                                                                                                                                                                                    |
+| ------------------------------------ | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| POST /sim/cards/:id/authorize        | `{amountCents, mcc, merchant, foreign?, atmOutOfNetwork?}` | `{approved, reason?, holdCents, feeCents, expiresAt, authorizationId}`; decline reasons: `card_frozen`, `card_canceled`, `card_inactive`, `account_frozen`, `kyc_not_approved`, `velocity`, `daily_limit`, `monthly_limit`, `insufficient_funds`, `member_inactive`, `mcc_blocked`, `per_txn_limit`, `member_daily_limit`, `member_monthly_limit`, `allowance_exceeded` |
+| POST /sim/authorizations/:id/capture | `{amountCents}`                                            | Settle (partial or within over-capture tolerance). 422 `capture_rejected`                                                                                                                                                                                                                                                                                               |
+| POST /sim/authorizations/:id/refund  | `{refundId, amountCents}`                                  | Merchant refund, once per `refundId` (`duplicate: true` on repeat)                                                                                                                                                                                                                                                                                                      |
 
 ## Staff (`admin` / `support_agent`; some actions admin only)
-| Method + path | Body | Does |
-|---|---|---|
-| GET /admin/users?kyc= | — | Customers with KYC state, last check, balances, ACH deposits |
-| POST /admin/users/:id/kyc | `{state, reason}` | Transition (reason required). Approve only from `needs_review`/`suspended`/`frozen_legal`; `frozen_legal` in/out = admin |
-| POST /admin/users/:id/tier | `{tier}` | admin |
-| POST /admin/accounts/:id/freeze · /unfreeze | `{reason}` | Frozen accounts decline cards and block transfers |
-| POST /admin/transfers/:id/return | `{code}` | Simulate/record an ACH return (R01, R10, …) → reversal / claw-back |
-| GET /admin/disputes | — | All disputes |
-| POST /admin/disputes/:id/provisional-credit | — | Post provisional credit |
-| POST /admin/disputes/:id/resolve | `{outcome:"won"|"lost"}` | Lost reverses provisional credit |
-| GET /admin/ledger?limit= | — | Latest txns with lines + `trialBalanceCents` (must be 0) |
-| GET /admin/audit | — | Audit log |
-| POST /admin/jobs/settle-ach | — | Settle due ACH (release deposit holds) |
-| POST /admin/jobs/expire-auths | — | Mark expired card auths, release holds |
-| POST /admin/jobs/dispute-deadlines | — | Provisional credit for open disputes due within 24h |
-| POST /admin/jobs/accrue-interest | `{day?}` | Daily savings accrual (idempotent per account/day) |
-| POST /admin/jobs/post-interest | `{period}` | Monthly posting with banker's rounding + carry (idempotent per account/period) |
+
+| Method + path                               | Body              | Does                                                                                                                     |
+| ------------------------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| GET /admin/users?kyc=                       | —                 | Customers with KYC state, last check, balances, ACH deposits                                                             |
+| POST /admin/users/:id/kyc                   | `{state, reason}` | Transition (reason required). Approve only from `needs_review`/`suspended`/`frozen_legal`; `frozen_legal` in/out = admin |
+| POST /admin/users/:id/tier                  | `{tier}`          | admin                                                                                                                    |
+| POST /admin/accounts/:id/freeze · /unfreeze | `{reason}`        | Frozen accounts decline cards and block transfers                                                                        |
+| POST /admin/transfers/:id/return            | `{code}`          | Simulate/record an ACH return (R01, R10, …) → reversal / claw-back                                                       |
+| GET /admin/disputes                         | —                 | All disputes                                                                                                             |
+| POST /admin/disputes/:id/provisional-credit | —                 | Post provisional credit                                                                                                  |
+| POST /admin/disputes/:id/resolve            | `{outcome:"won"   | "lost"}`                                                                                                                 | Lost reverses provisional credit |
+| GET /admin/ledger?limit=                    | —                 | Latest txns with lines + `trialBalanceCents` (must be 0)                                                                 |
+| GET /admin/audit                            | —                 | Audit log                                                                                                                |
+| POST /admin/jobs/settle-ach                 | —                 | Settle due ACH (release deposit holds)                                                                                   |
+| POST /admin/jobs/expire-auths               | —                 | Mark expired card auths, release holds                                                                                   |
+| POST /admin/jobs/dispute-deadlines          | —                 | Provisional credit for open disputes due within 24h                                                                      |
+| POST /admin/jobs/accrue-interest            | `{day?}`          | Daily savings accrual (idempotent per account/day)                                                                       |
+| POST /admin/jobs/post-interest              | `{period}`        | Monthly posting with banker's rounding + carry (idempotent per account/period)                                           |
 
 ## Webhooks
-| Method + path | Does |
-|---|---|
+
+| Method + path         | Does                                                                                                                                                                                                                 |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | POST /webhooks/stripe | Verifies `Stripe-Signature` (HMAC-SHA256, 5-min tolerance) with `STRIPE_WEBHOOK_SECRET`; each event id processed once (`provider_events`); `issuing_authorization.request` → same authorization logic → `{approved}` |

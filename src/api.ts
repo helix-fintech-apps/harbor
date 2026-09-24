@@ -3,23 +3,53 @@
 //  - demo:  the same service + router running in the browser on an in-memory store with fake
 //           providers, persisted to localStorage (no backend needed; default for local dev / Helix runs).
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { createMemoryApp, seedDemo, DEMO_PASSWORD, DEMO_USERS, type MemoryApp } from "@shared/app/demo.ts";
+import {
+  createMemoryApp,
+  seedDemo,
+  DEMO_PASSWORD,
+  DEMO_USERS,
+  type MemoryApp,
+} from "@shared/app/demo.ts";
 
 export type Role = "customer" | "admin" | "support_agent";
-export interface Session { userId: string; email: string; role: Role }
-export interface ApiResult<T = any> { ok: boolean; status: number; data: T; error?: { code: string; message: string; details?: unknown } }
+export interface Session {
+  userId: string;
+  email: string;
+  role: Role;
+}
+export interface ApiResult<T = any> {
+  ok: boolean;
+  status: number;
+  data: T;
+  error?: { code: string; message: string; details?: unknown };
+}
 
 const LIVE = !!import.meta.env.VITE_SUPABASE_URL;
 export const MODE: "live" | "demo" = LIVE ? "live" : "demo";
-const supabase: SupabaseClient | null = LIVE ? createClient(import.meta.env.VITE_SUPABASE_URL!, import.meta.env.VITE_SUPABASE_ANON_KEY!) : null;
+const supabase: SupabaseClient | null = LIVE
+  ? createClient(import.meta.env.VITE_SUPABASE_URL!, import.meta.env.VITE_SUPABASE_ANON_KEY!)
+  : null;
 
 const DEMO_KEY = "harbor-demo-v1";
 const SESSION_KEY = "harbor-session";
 export { DEMO_PASSWORD };
 let demo: Promise<MemoryApp> | null = null;
 
-function safeGet(k: string) { try { return localStorage.getItem(k); } catch { return null; } }
-function safeSet(k: string, v: string | null) { try { if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch { /* ignore */ } }
+function safeGet(k: string) {
+  try {
+    return localStorage.getItem(k);
+  } catch {
+    return null;
+  }
+}
+function safeSet(k: string, v: string | null) {
+  try {
+    if (v === null) localStorage.removeItem(k);
+    else localStorage.setItem(k, v);
+  } catch {
+    /* ignore */
+  }
+}
 
 async function demoApp(): Promise<MemoryApp> {
   if (!demo) {
@@ -87,7 +117,12 @@ export function newIdempotencyKey() {
   return crypto.randomUUID();
 }
 
-export async function call<T = any>(method: "GET" | "POST", path: string, body?: unknown, idempotencyKey?: string): Promise<ApiResult<T>> {
+export async function call<T = any>(
+  method: "GET" | "POST",
+  path: string,
+  body?: unknown,
+  idempotencyKey?: string,
+): Promise<ApiResult<T>> {
   if (supabase) {
     const { data } = await supabase.auth.getSession();
     const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/api${path}`, {
@@ -104,7 +139,13 @@ export async function call<T = any>(method: "GET" | "POST", path: string, body?:
   }
   const app = await demoApp();
   const s = getSession();
-  const res = await app.call(s ? { userId: s.userId, role: s.role } : null, method, path, body ?? {}, { idempotencyKey });
+  const res = await app.call(
+    s ? { userId: s.userId, role: s.role } : null,
+    method,
+    path,
+    body ?? {},
+    { idempotencyKey },
+  );
   if (method !== "GET") await persist(app);
   const b = res.body as any;
   return { ok: res.status < 400, status: res.status, data: b, error: b?.error };
