@@ -86,6 +86,10 @@ add("POST", "/admin/support/cases/:id/assign", (s, c, p, b) =>
 add("POST", "/admin/support/cases/:id/status", (s, c, p, b) =>
   s.setSupportCaseStatus(c, p.id, b?.status),
 );
+add("GET", "/admin/support/cases/:id/transactions", (s, c, p) => s.caseTransactions(c, p.id));
+add("POST", "/admin/support/cases/:id/disputes", (s, c, p, b) =>
+  s.disputeCaseTransaction(c, p.id, b),
+);
 add("POST", "/disputes", (s, c, _p, b) => s.openDispute(c, b));
 add("GET", "/statements", (s, c, _p, _b, q) => s.statement(c, q.accountId, q.period));
 add("POST", "/accounts/close", (s, c, _p, b) => s.closeAccount(c, b ?? {}));

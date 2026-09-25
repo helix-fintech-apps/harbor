@@ -58,6 +58,7 @@ import {
   openDispute,
   planProvisionalCredit,
   resolveDispute,
+  planCaseDispute,
   type Dispute,
   dailyAccrualMicro,
   planMonthlyInterest,
@@ -1782,6 +1783,131 @@ export class HarborService {
       }
     }
     return { credited };
+  }
+
+  // ---------- case disputes (agent-initiated from a support case) ----------
+
+  // Transactions an agent can dispute from a case: the case customer's posted card purchases.
+  async caseTransactions(c: Caller, caseId: string) {
+    this.requireStaff(c);
+    const cse = await this.store.one("support_cases", { id: caseId });
+    if (!cse) throw new ApiError(404, "not_found", "case not found");
+    const accountIds = new Set(
+      (await this.store.list("accounts", { user_id: cse.user_id })).map((a) => a.id),
+    );
+    const cardIds = new Set(
+      (await this.store.list("cards"))
+        .filter((cd) => accountIds.has(cd.account_id))
+        .map((cd) => cd.id),
+    );
+    return (await this.store.list("card_authorizations"))
+      .filter((a) => cardIds.has(a.card_id) && a.status === "captured")
+      .map((a) => ({
+        id: a.id,
+        merchant: a.merchant,
+        amountCents: Number(a.captured_cents),
+        refundedCents: Number(a.refunded_cents),
+        postedAt: a.captured_at ?? a.created_at,
+      }));
+  }
+
+  // An agent working the case marks a transaction disputed, which kicks off the refund.
+  async disputeCaseTransaction(
+    c: Caller,
+    caseId: string,
+    body: { authorizationId: string; reason: string },
+  ) {
+    this.requireStaff(c);
+    const cse = await this.store.one("support_cases", { id: caseId });
+    if (!cse) throw new ApiError(404, "not_found", "case not found");
+    const a = await this.store.one("card_authorizations", { id: body.authorizationId });
+    if (!a) throw new ApiError(404, "not_found", "transaction not found");
+
+    let plan;
+    try {
+      plan = planCaseDispute({
+        input: { caseId, authorizationId: body.authorizationId, reason: body?.reason ?? "" },
+        capturedCents: Number(a.captured_cents),
+        refundedCents: Number(a.refunded_cents),
+        status: a.status,
+      });
+    } catch (e) {
+      throw new ApiError(422, "dispute_rejected", (e as Error).message);
+    }
+
+    const card = await this.store.one("cards", { id: a.card_id });
+    const acct = await this.store.one("accounts", { id: card!.account_id });
+
+    // Record the dispute against the case for the audit trail.
+    const existingOpen = (await this.store.list("disputes", { auth_id: a.id })).some(
+      (x) => x.status === "open" || x.status === "provisional_credited",
+    );
+    const dsp = openDispute(
+      {
+        id: uuid(),
+        authId: a.id,
+        accountId: a.funding_party,
+        creditAccount: a.funding_account,
+        amountCents: plan.amountCents,
+        capturedCents: Number(a.captured_cents),
+        refundedCents: Number(a.refunded_cents),
+        postedAt: new Date(a.captured_at ?? a.created_at),
+        now: this.now(),
+        accountOpenedAt: new Date(acct!.opened_at),
+        existingOpen,
+      },
+      this.policy,
+    );
+    await this.store.disputeOpen({
+      dispute: {
+        id: dsp.id,
+        auth_id: a.id,
+        user_id: acct!.user_id,
+        credit_account: dsp.creditAccount,
+        credit_party: dsp.accountId,
+        amount_cents: dsp.amountCents,
+        reason: plan.reason,
+        status: "open",
+        provisional_credit_cents: 0,
+        provisional_credit_due_at: dsp.provisionalCreditDueAt.toISOString(),
+        resolution_due_at: dsp.resolutionDueAt.toISOString(),
+        policy_version: this.policy.version,
+        opened_at: dsp.openedAt.toISOString(),
+        resolved_at: null,
+      },
+      at: this.now().toISOString(),
+    });
+
+    // Kick off the refund process so the customer gets their money back right away.
+    const refundId = uuid();
+    const refund = await this.merchantRefund(a.id, refundId, plan.amountCents);
+
+    await this.store.insert("case_disputes", {
+      id: uuid(),
+      case_id: caseId,
+      auth_id: a.id,
+      dispute_id: dsp.id,
+      refund_id: refundId,
+      agent_id: c.userId,
+      amount_cents: plan.amountCents,
+      reason: plan.reason,
+      created_at: this.now().toISOString(),
+    });
+
+    await this.audit(cse.user_id, "support.case.dispute", "case_dispute", dsp.id, undefined, {
+      caseId,
+      authId: a.id,
+      refundId,
+      amountCents: plan.amountCents,
+    });
+
+    return {
+      caseId,
+      disputeId: dsp.id,
+      refundId,
+      amountCents: plan.amountCents,
+      refundedCents: refund.refundedCents,
+    };
   }
 
   // ---------- interest ----------
