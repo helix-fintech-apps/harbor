@@ -22,6 +22,7 @@ export interface Card {
   kind: CardKind;
   status: CardStatus;
   last4: string;
+  activateAt?: Date; // a scheduled start date; the card cannot authorize before it
 }
 
 const CARD_TRANSITIONS: Record<CardStatus, CardStatus[]> = {
@@ -45,6 +46,11 @@ export function transitionCard(card: Card, to: CardStatus): Card {
 /** Virtual cards are active immediately; physical cards start as `requested` until activated. */
 export function initialCardStatus(kind: CardKind): CardStatus {
   return kind === "virtual" ? "active" : "requested";
+}
+
+/** A card is usable once it has no future start date, or that start date has arrived. */
+export function isCardStarted(card: Pick<Card, "activateAt">, now: Date): boolean {
+  return !card.activateAt || now.getTime() >= card.activateAt.getTime();
 }
 
 export function canIssueCard(
@@ -75,6 +81,7 @@ export type DeclineReason =
   | "card_frozen"
   | "card_canceled"
   | "card_inactive"
+  | "card_not_active_yet"
   | "kyc_not_approved"
   | "velocity"
   | "daily_limit"
@@ -145,6 +152,8 @@ export function authorize(
   if (ctx.card.status === "frozen") return no("card_frozen");
   if (ctx.card.status === "canceled" || ctx.card.status === "replaced") return no("card_canceled");
   if (ctx.card.status !== "active") return no("card_inactive");
+  if (ctx.card.activateAt && ctx.now.getTime() < ctx.card.activateAt.getTime())
+    return no("card_not_active_yet");
   if (ctx.accountStatus && ctx.accountStatus !== "open") return no("account_frozen");
   if (!canMoveMoney(ctx.ownerKyc)) return no("kyc_not_approved");
   if (velocityExceeded(ctx.recentAuthAttempts, ctx.now, policy)) return no("velocity");
