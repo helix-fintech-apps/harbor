@@ -50,6 +50,13 @@ import {
   validateLimits,
   type FamilyMember,
   type SpendLimits,
+  newFamilyInvite,
+  acceptInvite,
+  inviteState,
+  validateCardStartDate,
+  resolveStartAt,
+  type FamilyInvite,
+  type InviteInput,
   openDispute,
   planProvisionalCredit,
   resolveDispute,
@@ -329,7 +336,35 @@ export class HarborService {
       kind: r.kind,
       status: r.status,
       last4: r.last4,
+      activateAt: r.activate_at ? new Date(r.activate_at) : undefined,
     };
+  }
+
+  toInvite(r: Row): FamilyInvite {
+    return {
+      id: r.id,
+      ownerUserId: r.owner_user_id,
+      firstName: r.first_name,
+      lastName: r.last_name,
+      dob: r.dob,
+      email: r.email,
+      kind: r.kind,
+      limits: {
+        perTxnCents: Number(r.per_txn_cents),
+        dailyCents: Number(r.daily_cents),
+        monthlyCents: Number(r.monthly_cents),
+      },
+      blockedMccGroups: r.blocked_mcc_groups ?? [],
+      cardKind: r.card_kind,
+      cardActivateAt: r.card_activate_at ? new Date(r.card_activate_at) : undefined,
+      token: r.token,
+      status: r.status,
+      expiresAt: new Date(r.expires_at),
+    };
+  }
+
+  private newInviteToken(): string {
+    return (uuid() + uuid()).replace(/-/g, "");
   }
 
   toMember(r: Row): FamilyMember {
@@ -1044,7 +1079,10 @@ export class HarborService {
   }
 
   // ---------- cards ----------
-  async issueCard(c: Caller, body: { kind: "virtual" | "physical"; familyMemberId?: string }) {
+  async issueCard(
+    c: Caller,
+    body: { kind: "virtual" | "physical"; familyMemberId?: string; activateAt?: string },
+  ) {
     const p = await this.profile(c.userId);
     const chk = await this.pocket(c.userId, "checking");
     const existing = (await this.store.list("cards", { account_id: chk.id })).map((r) =>
@@ -1070,6 +1108,8 @@ export class HarborService {
       const ok = canIssueCard(p.kyc_state, body.kind, existing, this.policy);
       if (!ok.ok) throw new ApiError(ok.reason === "kyc_not_approved" ? 403 : 409, ok.reason!);
     }
+    const startErrs = validateCardStartDate(body.activateAt, this.now());
+    if (startErrs.length) throw new ApiError(422, "invalid_start_date", startErrs.join("; "));
     const id = uuid();
     const prov = await this.providers.issuer.createCard({
       userId: c.userId,
@@ -1088,10 +1128,173 @@ export class HarborService {
       provider: this.providers.issuer.name,
       provider_card_id: prov.providerCardId,
       replaces_card_id: null,
+      activate_at: resolveStartAt(body.activateAt)?.toISOString() ?? null,
       created_at: this.now().toISOString(),
       canceled_at: null,
     });
     return row;
+  }
+
+  // Owner invites a family member. First/last name, DOB and email are required; the invite is
+  // "sent" with a one-time token and expires after INVITE_TTL_DAYS. Outstanding invites count
+  // against the family size cap so a burst of invites cannot exceed it once they all accept.
+  async inviteFamily(c: Caller, body: InviteInput) {
+    const p = await this.profile(c.userId);
+    if (!canMoveMoney(p.kyc_state)) throw new ApiError(403, "kyc_not_approved");
+    const members = (await this.store.list("family_members", { owner_user_id: c.userId })).filter(
+      (m) => m.status !== "removed",
+    ).length;
+    const pending = (await this.store.list("family_invites", { owner_user_id: c.userId })).filter(
+      (i) =>
+        inviteState({ status: i.status, expiresAt: new Date(i.expires_at) }, this.now()) === "sent",
+    ).length;
+    if (members + pending >= this.policy.family.maxMembers)
+      throw new ApiError(409, "family_full", "family member limit reached");
+    let inv;
+    try {
+      inv = newFamilyInvite(
+        { id: uuid(), ownerUserId: c.userId, token: this.newInviteToken(), input: body },
+        this.policy,
+        this.now(),
+      );
+    } catch (e) {
+      throw new ApiError(422, "invalid_invite", (e as Error).message);
+    }
+    const matched = await this.store.one("profiles", { email: inv.email });
+    await this.store.insert("family_invites", {
+      id: inv.id,
+      owner_user_id: c.userId,
+      member_user_id: matched?.id ?? null,
+      family_member_id: null,
+      first_name: inv.firstName,
+      last_name: inv.lastName,
+      dob: inv.dob,
+      email: inv.email,
+      kind: inv.kind,
+      per_txn_cents: inv.limits.perTxnCents,
+      daily_cents: inv.limits.dailyCents,
+      monthly_cents: inv.limits.monthlyCents,
+      blocked_mcc_groups: inv.blockedMccGroups,
+      card_kind: inv.cardKind,
+      card_activate_at: inv.cardActivateAt?.toISOString() ?? null,
+      token: inv.token,
+      status: "sent",
+      expires_at: inv.expiresAt.toISOString(),
+      accepted_at: null,
+    });
+    await this.audit(c.userId, "family.invite", "family_invite", inv.id, undefined, {
+      email: inv.email,
+      kind: inv.kind,
+    });
+    // The email provider is stubbed in test mode; return the token so the invitee can accept.
+    return {
+      id: inv.id,
+      email: inv.email,
+      status: "sent",
+      token: inv.token,
+      expiresAt: inv.expiresAt.toISOString(),
+    };
+  }
+
+  // The invitee accepts with the token from their invite. Their profile email must match the
+  // invited email. On success a family_member is created (linked to them) and a debit card is
+  // issued on the owner's checking with the invite's scheduled start date.
+  async acceptFamilyInvite(c: Caller, token: string, _body: unknown) {
+    const row = await this.store.one("family_invites", { token });
+    if (!row) throw new ApiError(404, "not_found", "invite not found");
+    const inv = this.toInvite(row);
+    const res = acceptInvite(inv, this.now());
+    if (!res.ok) throw new ApiError(res.reason === "invite_expired" ? 410 : 409, res.reason);
+    const acc = await this.profile(c.userId);
+    if ((acc.email ?? "").toLowerCase() !== inv.email)
+      throw new ApiError(403, "invite_email_mismatch", "this invite was sent to a different email");
+    const owner = await this.profile(inv.ownerUserId);
+    if (!canMoveMoney(owner.kyc_state))
+      throw new ApiError(403, "kyc_not_approved", "the inviting account cannot move money");
+    const plan = res.plan;
+
+    let member;
+    try {
+      const count = (
+        await this.store.list("family_members", { owner_user_id: inv.ownerUserId })
+      ).filter((m) => m.status !== "removed").length;
+      member = newFamilyMember(
+        {
+          id: uuid(),
+          ownerUserId: inv.ownerUserId,
+          name: plan.displayName,
+          kind: plan.kind,
+          limits: plan.limits,
+          blockedMccGroups: plan.blockedMccGroups,
+          existingCount: count,
+        },
+        this.policy,
+      );
+    } catch (e) {
+      throw new ApiError(422, "invalid_member", (e as Error).message);
+    }
+    await this.store.insert("family_members", {
+      id: member.id,
+      owner_user_id: inv.ownerUserId,
+      member_user_id: c.userId,
+      name: member.name,
+      kind: member.kind,
+      status: member.status,
+      per_txn_cents: member.limits.perTxnCents,
+      daily_cents: member.limits.dailyCents,
+      monthly_cents: member.limits.monthlyCents,
+      blocked_mcc_groups: member.blockedMccGroups,
+      blocked_mccs: member.blockedMccs,
+      approved_at:
+        member.status === "active" && member.kind === "teen" ? this.now().toISOString() : null,
+    });
+
+    const chk = await this.pocket(inv.ownerUserId, "checking");
+    const cardId = uuid();
+    const prov = await this.providers.issuer.createCard({
+      userId: c.userId,
+      legalName: plan.displayName,
+      kind: plan.cardKind,
+      cardId,
+    });
+    await this.store.insert("cards", {
+      id: cardId,
+      account_id: chk.id,
+      holder_user_id: c.userId,
+      family_member_id: member.id,
+      kind: plan.cardKind,
+      status: initialCardStatus(plan.cardKind),
+      last4: prov.last4,
+      provider: this.providers.issuer.name,
+      provider_card_id: prov.providerCardId,
+      replaces_card_id: null,
+      activate_at: plan.cardActivateAt?.toISOString() ?? null,
+      created_at: this.now().toISOString(),
+      canceled_at: null,
+    });
+
+    await this.store.update(
+      "family_invites",
+      { id: inv.id },
+      {
+        status: "accepted",
+        member_user_id: c.userId,
+        family_member_id: member.id,
+        accepted_at: this.now().toISOString(),
+      },
+    );
+    await this.audit(c.userId, "family.invite.accept", "family_invite", inv.id, undefined, {
+      member_id: member.id,
+      card_id: cardId,
+    });
+    return {
+      inviteId: inv.id,
+      memberId: member.id,
+      memberStatus: member.status,
+      cardId,
+      cardActivateAt: plan.cardActivateAt?.toISOString() ?? null,
+      status: "accepted",
+    };
   }
 
   async setCardStatus(c: Caller, cardId: string, to: CardStatus) {
@@ -1138,6 +1341,7 @@ export class HarborService {
       provider: this.providers.issuer.name,
       provider_card_id: prov.providerCardId,
       replaces_card_id: card.id,
+      activate_at: card.activate_at ?? null,
       created_at: this.now().toISOString(),
       canceled_at: null,
     });
@@ -1660,7 +1864,7 @@ export class HarborService {
         .filter((x) => String(x.day).startsWith(period))
         .reduce((s, x) => s + BigInt(x.accrued_micro), 0n);
       const prev = (await this.store.list("interest_postings", { account_id: a.id })).sort((x, y) =>
-        y.period.localeCompare(x.period),
+        x.period.localeCompare(y.period),
       )[0];
       const carryIn = prev ? BigInt(prev.carry_out_micro) : 0n;
       const plan = planMonthlyInterest({
