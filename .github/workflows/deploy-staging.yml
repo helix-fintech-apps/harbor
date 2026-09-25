@@ -26,7 +26,7 @@ env:
 jobs:
   supabase:
     name: Supabase (db push + seed + functions deploy)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment:
       name: staging
@@ -123,7 +123,7 @@ jobs:
   web:
     name: Vercel (staging)
     needs: supabase # schema + API first, then the UI that depends on them
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment:
       name: staging

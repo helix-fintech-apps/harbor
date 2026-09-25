@@ -21,7 +21,7 @@ jobs:
     # The ruleset requires the "CodeQL" check that code scanning posts from these results
     # (and a code_scanning rule); see docs/BRANCH_PROTECTION.md.
     name: Analyze (${{ matrix.language }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read
