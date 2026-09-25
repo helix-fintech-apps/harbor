@@ -71,6 +71,13 @@ import {
   addBusinessDays,
   checkLimit,
   limitWindow,
+  txn,
+  dr,
+  cr,
+  validateGoal,
+  newGoal,
+  planContribution,
+  type Goal,
 } from "../domain/index.ts";
 import type { Providers } from "../providers/index.ts";
 import { MoneyOpError, uuid, type Row, type Store } from "./store.ts";
@@ -1930,6 +1937,81 @@ export class HarborService {
   async adminAudit(c: Caller) {
     this.requireStaff(c);
     return (await this.store.list("audit_log")).slice(-200).reverse();
+  }
+
+  // ---------- savings goals ----------
+  toGoal(r: Row): Goal {
+    return {
+      id: r.id,
+      userId: r.user_id,
+      name: r.name,
+      targetCents: Number(r.target_cents),
+      savedCents: Number(r.saved_cents),
+    };
+  }
+
+  async createGoal(c: Caller, body: { name: string; targetCents: number }) {
+    const p = await this.profile(c.userId);
+    const errors = validateGoal({ name: body?.name, targetCents: body?.targetCents });
+    if (errors.length) throw new ApiError(422, "invalid_goal", errors.join("; "), errors);
+    const goal = newGoal({
+      id: uuid(),
+      userId: p.id,
+      name: body.name,
+      targetCents: body.targetCents,
+    });
+    await this.store.insert("savings_goals", {
+      id: goal.id,
+      user_id: goal.userId,
+      name: goal.name,
+      target_cents: goal.targetCents,
+      saved_cents: goal.savedCents,
+      created_at: this.now().toISOString(),
+    });
+    return this.toGoal({
+      id: goal.id,
+      user_id: goal.userId,
+      name: goal.name,
+      target_cents: goal.targetCents,
+      saved_cents: goal.savedCents,
+    });
+  }
+
+  async listGoals(c: Caller) {
+    const rows = await this.store.list("savings_goals", { user_id: c.userId });
+    return rows
+      .sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0))
+      .map((r) => this.toGoal(r));
+  }
+
+  async contributeGoal(c: Caller, goalId: string, body: { amountCents: number }) {
+    await this.profile(c.userId);
+    const row = await this.store.one("savings_goals", { id: goalId });
+    if (!row || row.user_id !== c.userId) throw new ApiError(404, "not_found", "goal not found");
+    const goal = this.toGoal(row);
+    const checking = await this.pocket(c.userId, "checking");
+    const savings = await this.pocket(c.userId, "savings");
+    const availableCents = (await this.balanceOf(checking.id)).availableCents;
+    let plan;
+    try {
+      plan = planContribution({ goal, amountCents: body?.amountCents, availableCents });
+    } catch (e) {
+      throw new ApiError(422, "invalid_contribution", (e as Error).message);
+    }
+    const contributionId = uuid();
+    await this.store.postLedger(
+      txn(
+        "goal_contribution",
+        [
+          dr("customer_deposits", body.amountCents, checking.id),
+          cr("customer_deposits", body.amountCents, savings.id),
+        ],
+        contributionId,
+      ),
+      `goal_contribution:${contributionId}`,
+    );
+    await this.store.update("savings_goals", { id: goalId }, { saved_cents: plan.newSaved });
+    return { goalId, savedCents: plan.newSaved };
   }
 
   // ---------- idempotency ----------

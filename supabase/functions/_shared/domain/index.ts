@@ -14,3 +14,4 @@ export * from "./interest.ts";
 export * from "./closure.ts";
 export * from "./statements.ts";
 export * from "./idempotency.ts";
+export * from "./goals.ts";
