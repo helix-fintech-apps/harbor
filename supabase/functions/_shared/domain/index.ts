@@ -11,6 +11,7 @@ export * from "./cards.ts";
 export * from "./family.ts";
 export * from "./support.ts";
 export * from "./disputes.ts";
+export * from "./caseDisputes.ts";
 export * from "./interest.ts";
 export * from "./closure.ts";
 export * from "./statements.ts";
