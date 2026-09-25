@@ -7,6 +7,7 @@ export * from "./limits.ts";
 export * from "./accounts.ts";
 export * from "./achIn.ts";
 export * from "./transfers.ts";
+export * from "./roundup.ts";
 export * from "./cards.ts";
 export * from "./family.ts";
 export * from "./disputes.ts";

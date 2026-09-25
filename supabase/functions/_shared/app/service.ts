@@ -31,6 +31,7 @@ import {
   planAchPush,
   planP2P,
   planPocketMove,
+  planRoundup,
   TransferError,
   transferFee,
   type SenderCtx,
@@ -1041,6 +1042,60 @@ export class HarborService {
       })
       .catch((e) => this.opFailed(e));
     return { id, status: "completed" };
+  }
+
+  // ---------- round-ups ----------
+  async setRoundup(c: Caller, enabled: boolean) {
+    await this.profile(c.userId);
+    const at = this.now().toISOString();
+    const existing = await this.store.one("roundup_settings", { user_id: c.userId });
+    if (existing)
+      await this.store.update(
+        "roundup_settings",
+        { user_id: c.userId },
+        { enabled, updated_at: at },
+      );
+    else
+      await this.store.insert("roundup_settings", {
+        user_id: c.userId,
+        enabled,
+        created_at: at,
+        updated_at: at,
+      });
+    await this.audit(c.userId, "roundup_set", "roundup_settings", c.userId, undefined, { enabled });
+    return { enabled };
+  }
+
+  async getRoundup(c: Caller) {
+    await this.profile(c.userId);
+    const r = await this.store.one("roundup_settings", { user_id: c.userId });
+    return { enabled: !!r?.enabled };
+  }
+
+  async sweepRoundup(c: Caller, body: { amountCents: number }) {
+    const settings = await this.store.one("roundup_settings", { user_id: c.userId });
+    if (!settings?.enabled) throw new ApiError(409, "roundup_disabled", "enable round-ups first");
+    const checking = await this.pocket(c.userId, "checking");
+    const savings = await this.pocket(c.userId, "savings");
+    if (checking.status !== "open" || savings.status !== "open")
+      throw new ApiError(409, "account_frozen");
+    const availableCents = (await this.balanceOf(checking.id)).availableCents;
+    const id = uuid();
+    let ledger;
+    try {
+      ledger = planRoundup({
+        id,
+        checkingAccountId: checking.id,
+        memberSavingsId: savings.id,
+        amountCents: body.amountCents,
+        availableCents,
+      });
+    } catch (e) {
+      throw new ApiError(422, "roundup_rejected", (e as Error).message);
+    }
+    if (!ledger) return { sweptCents: 0 };
+    await this.store.postLedger(ledger, `roundup:${id}`);
+    return { sweptCents: ledger.lines[0].debit };
   }
 
   // ---------- cards ----------
