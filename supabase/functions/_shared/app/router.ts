@@ -81,6 +81,9 @@ add("POST", "/family/:id/allowance", (s, c, p, b) =>
 add("POST", "/disputes", (s, c, _p, b) => s.openDispute(c, b));
 add("GET", "/statements", (s, c, _p, _b, q) => s.statement(c, q.accountId, q.period));
 add("POST", "/accounts/close", (s, c, _p, b) => s.closeAccount(c, b ?? {}));
+add("POST", "/goals", (s, c, _p, b) => s.createGoal(c, b));
+add("GET", "/goals", (s, c) => s.listGoals(c));
+add("POST", "/goals/:id/contribute", (s, c, p, b) => s.contributeGoal(c, p.id, b));
 
 // Card network simulator (fake issuer) — in test mode Stripe Issuing webhooks map onto the same service calls.
 add("POST", "/sim/cards/:id/authorize", async (s, c, p, b) => {
