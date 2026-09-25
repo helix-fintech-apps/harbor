@@ -78,6 +78,14 @@ add("POST", "/family/:id/limits", (s, c, p, b) => s.updateMemberLimits(c, p.id, 
 add("POST", "/family/:id/allowance", (s, c, p, b) =>
   s.allowanceTopUp(c, p.id, b?.amountCents, b?.idempotencyKey),
 );
+add("POST", "/support/cases", (s, c, _p, b) => s.openSupportCase(c, b));
+add("GET", "/admin/support/cases", (s, c, _p, _b, q) => s.supportQueue(c, q.status));
+add("POST", "/admin/support/cases/:id/assign", (s, c, p, b) =>
+  s.assignSupportCase(c, p.id, b?.agentId),
+);
+add("POST", "/admin/support/cases/:id/status", (s, c, p, b) =>
+  s.setSupportCaseStatus(c, p.id, b?.status),
+);
 add("POST", "/disputes", (s, c, _p, b) => s.openDispute(c, b));
 add("GET", "/statements", (s, c, _p, _b, q) => s.statement(c, q.accountId, q.period));
 add("POST", "/accounts/close", (s, c, _p, b) => s.closeAccount(c, b ?? {}));

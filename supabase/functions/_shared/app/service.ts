@@ -50,6 +50,11 @@ import {
   validateLimits,
   type FamilyMember,
   type SpendLimits,
+  newSupportCase,
+  transitionCase,
+  isSupportCaseStatus,
+  type SupportCase,
+  type SupportCaseInput,
   openDispute,
   planProvisionalCredit,
   resolveDispute,
@@ -1092,6 +1097,155 @@ export class HarborService {
       canceled_at: null,
     });
     return row;
+  }
+
+  toCase(r: Row): SupportCase {
+    return {
+      id: r.id,
+      userId: r.user_id,
+      firstName: r.first_name,
+      lastName: r.last_name,
+      email: r.email,
+      subject: r.subject,
+      body: r.body ?? "",
+      status: r.status,
+    };
+  }
+
+  /** Total posted deposit balance across a customer's Harbor accounts, in cents. */
+  async totalBalanceCents(userId: string): Promise<number> {
+    let total = 0;
+    for (const a of await this.pockets(userId)) total += (await this.balanceOf(a.id)).postedCents;
+    return total;
+  }
+
+  // A customer opens a support case. Contact fields default from their profile when omitted.
+  async openSupportCase(
+    c: Caller,
+    body: {
+      firstName?: string;
+      lastName?: string;
+      email?: string;
+      subject?: string;
+      body?: string;
+    },
+  ) {
+    const p = await this.profile(c.userId);
+    const legal = (p.legal_name ?? "").trim();
+    const input: SupportCaseInput = {
+      firstName: body?.firstName ?? legal.split(/\s+/)[0] ?? "",
+      lastName: body?.lastName ?? legal.split(/\s+/).slice(1).join(" ") ?? "",
+      email: body?.email ?? p.email ?? "",
+      subject: body?.subject ?? "",
+      body: body?.body,
+    };
+    let cse;
+    try {
+      cse = newSupportCase({ id: uuid(), userId: c.userId, input });
+    } catch (e) {
+      throw new ApiError(422, "invalid_case", (e as Error).message);
+    }
+    await this.store.insert("support_cases", {
+      id: cse.id,
+      user_id: c.userId,
+      first_name: cse.firstName,
+      last_name: cse.lastName,
+      email: cse.email,
+      subject: cse.subject,
+      body: cse.body,
+      status: "pending",
+      created_at: this.now().toISOString(),
+      updated_at: this.now().toISOString(),
+      finalized_at: null,
+    });
+    await this.audit(c.userId, "support.case.open", "support_case", cse.id, undefined, {
+      subject: cse.subject,
+    });
+    return { id: cse.id, status: "pending", subject: cse.subject };
+  }
+
+  // Staff queue: every case with the customer's contact snapshot, join date, total balance and agents.
+  async supportQueue(c: Caller, status?: string) {
+    this.requireStaff(c);
+    const rows = await this.store.list("support_cases", status ? { status } : undefined);
+    rows.sort((a, b) => (a.created_at ?? "").localeCompare(b.created_at ?? ""));
+    const out = [];
+    for (const r of rows) {
+      const cust = await this.store.one("profiles", { id: r.user_id });
+      const links = await this.store.list("support_case_agents", { case_id: r.id });
+      const agents = [];
+      for (const a of links) {
+        const ap = await this.store.one("profiles", { id: a.agent_id });
+        agents.push({ id: a.agent_id, name: ap?.legal_name ?? "", assignedAt: a.assigned_at });
+      }
+      out.push({
+        id: r.id,
+        subject: r.subject,
+        body: r.body ?? "",
+        status: r.status,
+        firstName: r.first_name,
+        lastName: r.last_name,
+        email: r.email,
+        joinedAt: cust?.created_at ?? null,
+        totalBalanceCents: await this.totalBalanceCents(r.user_id),
+        agents,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at,
+      });
+    }
+    return out;
+  }
+
+  // Assign a support agent (defaults to the caller). Many agents may handle one case; only staff.
+  async assignSupportCase(c: Caller, caseId: string, agentId?: string) {
+    this.requireStaff(c);
+    const cse = await this.store.one("support_cases", { id: caseId });
+    if (!cse) throw new ApiError(404, "not_found", "case not found");
+    const aid = agentId ?? c.userId;
+    const agent = await this.store.one("profiles", { id: aid });
+    if (!agent) throw new ApiError(404, "not_found", "agent not found");
+    if (agent.role !== "admin" && agent.role !== "support_agent")
+      throw new ApiError(422, "not_staff", "only support staff can be assigned to a case");
+    const existing = await this.store.one("support_case_agents", {
+      case_id: caseId,
+      agent_id: aid,
+    });
+    if (!existing)
+      await this.store.insert("support_case_agents", {
+        case_id: caseId,
+        agent_id: aid,
+        assigned_at: this.now().toISOString(),
+      });
+    const links = await this.store.list("support_case_agents", { case_id: caseId });
+    return { caseId, agents: links.map((a) => a.agent_id) };
+  }
+
+  // Move a case through Pending -> In Review -> Finalized (reopenable). Staff only.
+  async setSupportCaseStatus(c: Caller, caseId: string, status: string) {
+    this.requireStaff(c);
+    if (!isSupportCaseStatus(status))
+      throw new ApiError(422, "invalid_status", "status must be pending, in_review or finalized");
+    const cse = await this.store.one("support_cases", { id: caseId });
+    if (!cse) throw new ApiError(404, "not_found", "case not found");
+    let to;
+    try {
+      to = transitionCase(cse.status, status);
+    } catch (e) {
+      throw new ApiError(409, "invalid_transition", (e as Error).message);
+    }
+    await this.store.update(
+      "support_cases",
+      { id: caseId },
+      {
+        status: to,
+        updated_at: this.now().toISOString(),
+        finalized_at: to === "finalized" ? this.now().toISOString() : (cse.finalized_at ?? null),
+      },
+    );
+    await this.audit(c.userId, "support.case.status", "support_case", caseId, undefined, {
+      status: to,
+    });
+    return { id: caseId, status: to };
   }
 
   async setCardStatus(c: Caller, cardId: string, to: CardStatus) {
