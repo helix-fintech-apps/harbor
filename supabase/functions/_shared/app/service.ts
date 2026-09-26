@@ -1506,9 +1506,16 @@ export class HarborService {
     if (!body.reason?.trim()) throw new ApiError(422, "reason_required");
     const card = await this.store.one("cards", { id: a.card_id });
     const acct = await this.store.one("accounts", { id: card!.account_id });
-    const existingOpen = (await this.store.list("disputes", { auth_id: a.id })).some(
+    const priorDisputes = await this.store.list("disputes", { auth_id: a.id });
+    const existingOpen = priorDisputes.some(
       (x) => x.status === "open" || x.status === "provisional_credited",
     );
+    // N-CHGBK-05: a resolved (won) dispute already recovered its amount for the customer, so it
+    // counts against the disputable base — the same purchase can never be recovered twice.
+    const wonRecoveredCents = priorDisputes
+      .filter((x) => x.status === "won")
+      .reduce((s, x) => s + Number(x.amount_cents), 0);
+    const recoveredCents = Number(a.refunded_cents) + wonRecoveredCents;
     let dsp: Dispute;
     try {
       dsp = openDispute(
@@ -1519,7 +1526,7 @@ export class HarborService {
           creditAccount: a.funding_account,
           amountCents: body.amountCents,
           capturedCents: Number(a.captured_cents),
-          refundedCents: Number(a.refunded_cents),
+          refundedCents: recoveredCents,
           postedAt: new Date(a.captured_at ?? a.created_at),
           now: this.now(),
           accountOpenedAt: new Date(acct!.opened_at),
