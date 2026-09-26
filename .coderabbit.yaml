@@ -7,7 +7,10 @@ early_access: false
 
 tone_instructions: >-
   Be direct and specific. This is a bank: prioritise money correctness (balances, holds, fees,
-  ledger), authorization and data integrity over style nits. Quote the rule from docs/SPEC.md.
+  ledger), authorization and data integrity over style nits. Ground every money finding in the
+  Helix Consumer-Neobank playbook and cite its rule id (N-<AREA>-<NN>, e.g. N-CHGBK-05); the
+  playbook is the source of truth, and docs/SPEC.md is its in-repo implementation reference. Use
+  the same rule ids Helix uses so the two reviews line up.
 
 reviews:
   profile: assertive
@@ -20,7 +23,7 @@ reviews:
   auto_review:
     enabled: true
     drafts: false
-    base_branches: ["main"]
+    base_branches: ["main", "fix/.*", "feat/.*"]
     ignore_title_keywords: ["WIP", "[skip review]"]
   path_filters:
     - "!**/package-lock.json"
