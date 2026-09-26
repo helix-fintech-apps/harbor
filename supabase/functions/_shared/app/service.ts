@@ -1659,9 +1659,9 @@ export class HarborService {
       const accrued = (await this.store.list("interest_accruals", { account_id: a.id }))
         .filter((x) => String(x.day).startsWith(period))
         .reduce((s, x) => s + BigInt(x.accrued_micro), 0n);
-      const prev = (await this.store.list("interest_postings", { account_id: a.id })).sort((x, y) =>
-        y.period.localeCompare(x.period),
-      )[0];
+      const prev = (await this.store.list("interest_postings", { account_id: a.id }))
+        .filter((x) => x.period < period)
+        .sort((x, y) => y.period.localeCompare(x.period))[0];
       const carryIn = prev ? BigInt(prev.carry_out_micro) : 0n;
       const plan = planMonthlyInterest({
         accountId: a.id,
