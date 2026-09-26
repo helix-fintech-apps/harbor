@@ -1,6 +1,9 @@
 // Money policy + fee schedule. The same values are stored in `money_policies` and `fee_schedules`
 // (versioned). Holds, transfers and cards snapshot the version they were created under.
 
+import type { BtcRewardsPolicy } from "./rewards.ts";
+import { DEFAULT_BTC_REWARDS } from "./rewards.ts";
+
 export type Tier = "tier1" | "tier2";
 
 export interface TierLimits {
@@ -53,6 +56,8 @@ export interface MoneyPolicy {
     savingsApyBps: number; // applied as a simple daily rate: apy / 365 (documented)
     dayCountBasis: number;
   };
+  btcRewards: BtcRewardsPolicy; // Bitcoin cashback on captured debit spend
+  btcPriceCents: number; // current BTC spot price, USD cents per 1 BTC (oracle snapshot)
   holidays: string[]; // YYYY-MM-DD, non-business days for ACH/dispute timelines
 }
 
@@ -111,6 +116,8 @@ export const DEFAULT_POLICY: MoneyPolicy = {
     newAccountDays: 30,
   },
   interest: { savingsApyBps: 400, dayCountBasis: 365 },
+  btcRewards: DEFAULT_BTC_REWARDS,
+  btcPriceCents: 6_000_000, // $60,000 / BTC reference snapshot
   holidays: [
     "2026-01-01",
     "2026-05-25",

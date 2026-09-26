@@ -11,7 +11,8 @@ export type LedgerAccount =
   | "dispute_receivable" // provisional credit given, pending network outcome
   | "dispute_loss"
   | "ach_return_loss" // negative balances written off
-  | "closure_payout"; // closure payouts in flight
+  | "closure_payout" // closure payouts in flight
+  | "rewards_expense"; // cost of BTC cashback paid out when a member converts BTC -> USD
 
 export interface Line {
   account: LedgerAccount;
