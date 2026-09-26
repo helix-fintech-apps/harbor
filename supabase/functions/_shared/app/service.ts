@@ -71,6 +71,13 @@ import {
   addBusinessDays,
   checkLimit,
   limitWindow,
+  cashbackForSpend,
+  usdCentsToSats,
+  satsToUsdCents,
+  planBtcConversion,
+  txn,
+  dr,
+  cr,
 } from "../domain/index.ts";
 import type { Providers } from "../providers/index.ts";
 import { MoneyOpError, uuid, type Row, type Store } from "./store.ts";
@@ -191,7 +198,7 @@ export class HarborService {
     );
   }
 
-  async pocket(userId: string, kind: "checking" | "savings"): Promise<Row> {
+  async pocket(userId: string, kind: "checking" | "savings" | "rewards"): Promise<Row> {
     const a = (await this.pockets(userId)).find((x) => x.kind === kind);
     if (!a) throw new ApiError(409, "no_account", `no open ${kind} account (complete KYC first)`);
     return a;
@@ -987,12 +994,15 @@ export class HarborService {
   async pocketMove(
     c: Caller,
     body: {
-      from: "checking" | "savings";
+      from: "checking" | "savings" | "rewards";
       to: "checking" | "savings";
       amountCents: number;
       idempotencyKey?: string;
     },
   ) {
+    // The rewards wallet is a sweep source only — realised USD flows out to spend, never in.
+    if ((body.to as string) === "rewards")
+      throw new ApiError(422, "invalid_destination", "cannot move funds into the rewards wallet");
     const p = await this.profile(c.userId);
     const from = await this.pocket(c.userId, body.from);
     const to = await this.pocket(c.userId, body.to);
@@ -1283,11 +1293,185 @@ export class HarborService {
         at: this.now().toISOString(),
       })
       .catch((e) => this.opFailed(e, { status: 422, code: "capture_rejected" }));
+    await this.accrueCashback(a, plan.capturedCents);
     return {
       authorizationId: authId,
       capturedCents: plan.capturedCents,
       feeCents: plan.feeCents,
       releasedCents: plan.releasedCents,
+    };
+  }
+
+  /* ================= BTC cashback rewards ================= */
+
+  /** Program period the cap and accrual are scoped to (per UTC calendar year). */
+  rewardsPeriod(): string {
+    return String(this.now().getUTCFullYear());
+  }
+
+  /** Current BTC spot in USD cents/BTC: latest oracle snapshot if present, else the policy default. */
+  async btcPrice(): Promise<number> {
+    const rates = await this.store.list("btc_rates");
+    if (rates.length) {
+      const latest = rates.sort((x, y) => String(y.as_of).localeCompare(String(x.as_of)))[0];
+      return Number(latest.price_cents);
+    }
+    return this.policy.btcPriceCents;
+  }
+
+  /** Accrue Bitcoin cashback on a captured debit purchase. No-op for teen/family-card spend. */
+  async accrueCashback(auth: Row, capturedCents: number) {
+    if (!this.policy.btcRewards.enabled || capturedCents <= 0) return;
+    const card = await this.store.one("cards", { id: auth.card_id });
+    if (!card || card.family_member_id) return; // only the account owner's own spend earns
+    const account = await this.store.one("accounts", { id: card.account_id });
+    if (!account) return;
+    const userId = account.user_id as string;
+
+    // Idempotent per authorization: a re-capture never double-accrues.
+    const eventId = `reward:${auth.id}`;
+    if (await this.store.one("btc_reward_events", { id: eventId })) return;
+
+    const period = this.rewardsPeriod();
+    let row = await this.store.one("btc_rewards", { user_id: userId, period });
+    if (!row) {
+      row = await this.store.insert("btc_rewards", {
+        id: uuid(),
+        user_id: userId,
+        period,
+        eligible_cents: 0,
+        sats_balance: 0,
+        updated_at: this.now().toISOString(),
+      });
+    }
+    const price = await this.btcPrice();
+    const res = cashbackForSpend(Number(row.eligible_cents), capturedCents, this.policy.btcRewards);
+    const sats = usdCentsToSats(res.rewardUsdCents, price);
+
+    await this.store.update(
+      "btc_rewards",
+      { id: row.id },
+      {
+        eligible_cents: res.newEligibleCents,
+        sats_balance: Number(row.sats_balance) + sats,
+        updated_at: this.now().toISOString(),
+      },
+    );
+    await this.store.insert("btc_reward_events", {
+      id: eventId,
+      auth_id: auth.id,
+      user_id: userId,
+      period,
+      spend_cents: capturedCents,
+      eligible_spend_cents: res.eligibleSpendCents,
+      reward_usd_cents: res.rewardUsdCents,
+      sats,
+      price_cents: price,
+      created_at: this.now().toISOString(),
+    });
+  }
+
+  /** Read a member's rewards state: sats earned, cap progress, and the spendable wallet balance. */
+  async getRewards(c: Caller) {
+    const period = this.rewardsPeriod();
+    const row = await this.store.one("btc_rewards", { user_id: c.userId, period });
+    const sats = row ? Number(row.sats_balance) : 0;
+    const eligible = row ? Number(row.eligible_cents) : 0;
+    const price = await this.btcPrice();
+    const wallet = (await this.pockets(c.userId)).find((a) => a.kind === "rewards");
+    const walletUsdCents = wallet ? (await this.balanceOf(wallet.id)).availableCents : 0;
+    return {
+      period,
+      satsBalance: sats,
+      btcPriceCents: price,
+      estimatedUsdCents: satsToUsdCents(sats, price),
+      eligibleCents: eligible,
+      capCents: this.policy.btcRewards.capCents,
+      remainingEligibleCents: Math.max(0, this.policy.btcRewards.capCents - eligible),
+      walletUsdCents,
+    };
+  }
+
+  /** Ensure the member's spendable USD rewards wallet exists and return it. */
+  async rewardsWallet(userId: string): Promise<Row> {
+    const existing = (await this.pockets(userId)).find((a) => a.kind === "rewards");
+    if (existing) return existing;
+    const id = uuid();
+    return this.store.insert("accounts", {
+      id,
+      user_id: userId,
+      kind: "rewards",
+      status: "open",
+      account_number: fakeAccountNumber(id),
+      routing_number: HARBOR_ROUTING_NUMBER,
+      nickname: "Bitcoin rewards",
+      policy_version: this.policy.version,
+      opened_at: this.now().toISOString(),
+      closed_at: null,
+    });
+  }
+
+  /** Convert earned BTC to spendable USD at the live rate. A member can never spend BTC directly. */
+  async convertBtc(c: Caller, body: { sats: number; idempotencyKey?: string }) {
+    const period = this.rewardsPeriod();
+    const row = await this.store.one("btc_rewards", { user_id: c.userId, period });
+    if (!row || Number(row.sats_balance) <= 0)
+      throw new ApiError(409, "no_btc", "no Bitcoin rewards to convert");
+    const price = await this.btcPrice();
+    let plan;
+    try {
+      plan = planBtcConversion(Number(row.sats_balance), Number(body.sats), price);
+    } catch (e) {
+      const msg = (e as Error).message;
+      if (msg.includes("insufficient")) throw new ApiError(409, "insufficient_btc_balance", msg);
+      if (msg.includes("below_one_cent"))
+        throw new ApiError(422, "amount_too_small", "converts to less than $0.01");
+      throw new ApiError(422, "convert_rejected", msg);
+    }
+    const wallet = await this.rewardsWallet(c.userId);
+    const idemKey = `btc-convert:${c.userId}:${body.idempotencyKey ?? uuid()}`;
+
+    // Idempotent: the same key returns the first result without paying out or debiting twice.
+    const prior = await this.store.one("btc_conversions", { idempotency_key: idemKey });
+    if (prior) {
+      return {
+        converted: true,
+        replayed: true,
+        satsDebited: Number(prior.sats),
+        usdCents: Number(prior.usd_cents),
+        remainingSats: Number(row.sats_balance),
+        walletUsdCents: (await this.balanceOf(wallet.id)).availableCents,
+      };
+    }
+
+    const t = txn(
+      "btc_reward_conversion",
+      [dr("rewards_expense", plan.usdCents), cr("customer_deposits", plan.usdCents, wallet.id)],
+      `btc-convert:${wallet.id}`,
+    );
+    await this.store.postLedger(t, idemKey);
+    await this.store.insert("btc_conversions", {
+      id: uuid(),
+      user_id: c.userId,
+      period,
+      idempotency_key: idemKey,
+      sats: plan.satsDebited,
+      usd_cents: plan.usdCents,
+      price_cents: price,
+      created_at: this.now().toISOString(),
+    });
+    await this.store.update(
+      "btc_rewards",
+      { id: row.id },
+      { sats_balance: plan.remainingSats, updated_at: this.now().toISOString() },
+    );
+    return {
+      converted: true,
+      replayed: false,
+      satsDebited: plan.satsDebited,
+      usdCents: plan.usdCents,
+      remainingSats: plan.remainingSats,
+      walletUsdCents: (await this.balanceOf(wallet.id)).availableCents,
     };
   }
 

@@ -4,7 +4,7 @@
 import type { Line } from "./ledger.ts";
 import { partyBalance } from "./ledger.ts";
 
-export type AccountKind = "checking" | "savings";
+export type AccountKind = "checking" | "savings" | "rewards";
 export type AccountStatus = "open" | "frozen" | "closing" | "closed";
 
 /** Harbor's fake routing number (passes the ABA checksum; not a real bank). */
