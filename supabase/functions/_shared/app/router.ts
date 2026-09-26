@@ -32,10 +32,16 @@ interface Route {
   handler: Handler;
   mutating: boolean;
   public?: boolean;
+  money?: boolean;
 }
 
 const routes: Route[] = [];
-function add(method: string, path: string, handler: Handler, opts: { public?: boolean } = {}) {
+function add(
+  method: string,
+  path: string,
+  handler: Handler,
+  opts: { public?: boolean; money?: boolean } = {},
+) {
   const keys: string[] = [];
   const pattern = new RegExp(
     "^" +
@@ -45,7 +51,15 @@ function add(method: string, path: string, handler: Handler, opts: { public?: bo
       }) +
       "$",
   );
-  routes.push({ method, pattern, keys, handler, mutating: method !== "GET", public: opts.public });
+  routes.push({
+    method,
+    pattern,
+    keys,
+    handler,
+    mutating: method !== "GET",
+    public: opts.public,
+    money: opts.money,
+  });
 }
 
 // Public
@@ -58,14 +72,14 @@ add("POST", "/kyc/refresh", async (s, c, _p, b) => s.runKyc(c, b?.sessionId));
 add("POST", "/banks/link-token", (s, c) => s.linkToken(c));
 add("POST", "/banks/exchange", (s, c, _p, b) => s.exchange(c, b?.publicToken));
 add("POST", "/banks/:id/remove", (s, c, p) => s.removeBank(c, p.id));
-add("POST", "/direct-deposit", (s, c, _p, b) => s.directDeposit(c, b));
+add("POST", "/direct-deposit", (s, c, _p, b) => s.directDeposit(c, b), { money: true });
 add("GET", "/transfers/fee-quote", async (s, _c, _p, _b, q) =>
   s.quoteFee(Number(q.amountCents), q.speed === "instant" ? "instant" : "standard"),
 );
-add("POST", "/transfers/ach-in", (s, c, _p, b) => s.achIn(c, b));
-add("POST", "/transfers/ach-out", (s, c, _p, b) => s.achOut(c, b));
-add("POST", "/transfers/p2p", (s, c, _p, b) => s.p2p(c, b));
-add("POST", "/transfers/pocket", (s, c, _p, b) => s.pocketMove(c, b));
+add("POST", "/transfers/ach-in", (s, c, _p, b) => s.achIn(c, b), { money: true });
+add("POST", "/transfers/ach-out", (s, c, _p, b) => s.achOut(c, b), { money: true });
+add("POST", "/transfers/p2p", (s, c, _p, b) => s.p2p(c, b), { money: true });
+add("POST", "/transfers/pocket", (s, c, _p, b) => s.pocketMove(c, b), { money: true });
 add("POST", "/cards", (s, c, _p, b) => s.issueCard(c, b));
 add("POST", "/cards/:id/freeze", (s, c, p) => s.setCardStatus(c, p.id, "frozen"));
 add("POST", "/cards/:id/unfreeze", (s, c, p) => s.setCardStatus(c, p.id, "active"));
@@ -75,8 +89,11 @@ add("POST", "/cards/:id/replace", (s, c, p) => s.replaceCard(c, p.id));
 add("POST", "/family", (s, c, _p, b) => s.addFamilyMember(c, b));
 add("POST", "/family/:id/approve", (s, c, p) => s.approveMember(c, p.id));
 add("POST", "/family/:id/limits", (s, c, p, b) => s.updateMemberLimits(c, p.id, b));
-add("POST", "/family/:id/allowance", (s, c, p, b) =>
-  s.allowanceTopUp(c, p.id, b?.amountCents, b?.idempotencyKey),
+add(
+  "POST",
+  "/family/:id/allowance",
+  (s, c, p, b) => s.allowanceTopUp(c, p.id, b?.amountCents, b?.idempotencyKey),
+  { money: true },
 );
 add("POST", "/disputes", (s, c, _p, b) => s.openDispute(c, b));
 add("GET", "/statements", (s, c, _p, _b, q) => s.statement(c, q.accountId, q.period));
@@ -127,6 +144,12 @@ export async function route(s: HarborService, req: ApiRequest): Promise<ApiRespo
       if (!r.public && !req.caller) throw new ApiError(401, "unauthenticated", "sign in required");
       const caller = req.caller ?? { userId: "anon", role: "customer" as const };
       if (r.mutating) {
+        if (r.money && !req.idempotencyKey)
+          throw new ApiError(
+            400,
+            "idempotency_key_required",
+            "an Idempotency-Key header is required for this money movement",
+          );
         const res = await s.idempotent(
           caller,
           req.idempotencyKey,
