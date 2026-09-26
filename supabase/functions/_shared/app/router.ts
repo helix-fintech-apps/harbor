@@ -100,6 +100,9 @@ add("GET", "/statements", (s, c, _p, _b, q) => s.statement(c, q.accountId, q.per
 add("POST", "/accounts/close", (s, c, _p, b) => s.closeAccount(c, b ?? {}));
 
 // Card network simulator (fake issuer) — in test mode Stripe Issuing webhooks map onto the same service calls.
+add("GET", "/rewards", (s, c) => s.getRewards(c));
+add("POST", "/rewards/convert", (s, c, _p, b) => s.convertBtc(c, b), { money: true });
+
 add("POST", "/sim/cards/:id/authorize", async (s, c, p, b) => {
   await s.cardFor(c, p.id);
   return s.authorizeCard(p.id, b);

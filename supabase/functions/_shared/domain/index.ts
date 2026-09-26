@@ -11,6 +11,7 @@ export * from "./cards.ts";
 export * from "./family.ts";
 export * from "./disputes.ts";
 export * from "./interest.ts";
+export * from "./rewards.ts";
 export * from "./closure.ts";
 export * from "./statements.ts";
 export * from "./idempotency.ts";
