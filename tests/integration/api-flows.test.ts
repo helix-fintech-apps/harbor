@@ -4,6 +4,7 @@ import {
   selectProviders,
 } from "../../supabase/functions/_shared/providers/index.ts";
 import { harnesses, type TestApp } from "./support/harness.ts";
+import { route } from "../../supabase/functions/_shared/app/router.ts";
 
 const [AVA, BEN, RITA, OLEG, NIA, ADMIN] = DEMO_USERS;
 const as = (u: { id: string; role: string }) => ({
@@ -24,6 +25,29 @@ describe.each(harnesses().map((h) => [h.name, h] as const))("%s store", (_name, 
     app = await h.create(new Date("2026-09-21T15:00:00Z")); // Monday
   });
   afterAll(() => h.close());
+
+  describe("idempotency contract", () => {
+    it("rejects a money-movement POST that omits the Idempotency-Key", async () => {
+      const r = await route(app.service, {
+        method: "POST",
+        path: "/transfers/ach-in",
+        body: {},
+        caller: as(AVA),
+      });
+      expect(r.status).toBe(400);
+      expect(body(r).error.code).toBe("idempotency_key_required");
+    });
+    it("passes the key gate when one is supplied (fails later on validation, not the key)", async () => {
+      const r = await route(app.service, {
+        method: "POST",
+        path: "/transfers/ach-in",
+        body: {},
+        caller: as(AVA),
+        idempotencyKey: "k-gate",
+      });
+      expect(body(r).error?.code).not.toBe("idempotency_key_required");
+    });
+  });
 
   describe("seeded onboarding", () => {
     it("assigns KYC states from identity + sanctions", async () => {

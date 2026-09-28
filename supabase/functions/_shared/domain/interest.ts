@@ -40,7 +40,9 @@ export function planMonthlyInterest(p: {
   const cents = divRoundHalfEven(total, MICRO_PER_CENT);
   const carry = total - cents * MICRO_PER_CENT;
   const postCents = Number(cents);
-  if (postCents <= 0) return { postCents: 0, carryMicro: total > 0n ? total : 0n };
+  // Carry the full remainder forward with its sign; a negative remainder (a prior
+  // round-up we still owe back) must not be dropped, or the customer is over-paid.
+  if (postCents <= 0) return { postCents: 0, carryMicro: total };
   return {
     postCents,
     carryMicro: carry,

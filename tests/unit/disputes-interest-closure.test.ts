@@ -137,6 +137,19 @@ describe("savings interest", () => {
       }).postCents,
     ).toBe(1);
   });
+  it("carries a negative remainder forward instead of dropping it (no over-pay)", () => {
+    // Prior month rounded a posting UP, leaving a negative carry we still owe back.
+    // This month the balance is 0 (accrued 0); the negative remainder must survive.
+    const m = planMonthlyInterest({
+      accountId: "s",
+      period: "p",
+      accruedMicro: 0n,
+      carryInMicro: -400_000n,
+    });
+    expect(m.postCents).toBe(0);
+    expect(m.carryMicro).toBe(-400_000n);
+    expect(m.ledger).toBeUndefined();
+  });
 });
 
 describe("account closure", () => {

@@ -65,7 +65,9 @@ export function createApp<S extends Store>(
       path: p,
       body: body ?? {},
       caller,
-      idempotencyKey: o.idempotencyKey,
+      // A well-behaved client generates a fresh Idempotency-Key per action; default one so the
+      // demo/test transport models that. The server still enforces presence for money routes.
+      idempotencyKey: o.idempotencyKey ?? crypto.randomUUID(),
       query,
     };
     return route(service, req);

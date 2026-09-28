@@ -1,0 +1,14 @@
+name: Helix money-gate
+on:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  helix:
+    name: helix / money-correctness
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-deps
+      - name: Helix invariant suite (tests/generated)
+        run: npx vitest run tests/generated --reporter=verbose
