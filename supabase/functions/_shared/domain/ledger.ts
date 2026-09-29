@@ -2,11 +2,13 @@
 // Customer accounts are liabilities: balance = credits - debits (party = Harbor account id).
 
 export type LedgerAccount =
-  | "customer_deposits" // per Harbor account (checking / savings), party = account id
+  | "customer_deposits" // per Harbor account (checking / savings / envelope), party = account id
   | "family_allowance" // per family member (teen allowance pocket), party = member id
   | "ach_clearing" // ACH in flight to/from external banks
+  | "zelle_clearing" // Zelle payments in flight to/from recipients
   | "card_settlement" // card network settlement
   | "fee_revenue"
+  | "cashback_expense" // 1% debit-card cashback funded by Harbor (reversed on refund)
   | "interest_expense"
   | "dispute_receivable" // provisional credit given, pending network outcome
   | "dispute_loss"

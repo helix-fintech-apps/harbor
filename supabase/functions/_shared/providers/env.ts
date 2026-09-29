@@ -29,6 +29,11 @@ export function usePlaid(env: Env): boolean {
   return !!env.PLAID_CLIENT_ID && !!env.PLAID_SECRET && env.HARBOR_FORCE_FAKE !== "1";
 }
 
+export function useZelle(env: Env): boolean {
+  assertNoLiveKeys(env);
+  return !!env.ZELLE_API_KEY && env.HARBOR_FORCE_FAKE !== "1";
+}
+
 export async function stripeRequest(
   env: Env,
   method: "GET" | "POST",

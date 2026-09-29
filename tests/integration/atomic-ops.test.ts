@@ -135,7 +135,10 @@ describe.each(harnesses().map((h) => [h.name, h] as const))("%s store", (_name, 
       expect(codes(rs)).toEqual(["capture_rejected", "ok"]);
       const auth = (await me()).authorizations.find((x: any) => x.id === a.authorizationId);
       expect(auth.status).toBe("captured");
-      expect((await pocket()).postedCents).toBe(250_000 - Number(auth.captured_cents));
+      // captured spend leaves the pocket, then 1% cashback is credited back to it
+      expect((await pocket()).postedCents).toBe(
+        250_000 - Number(auth.captured_cents) + Math.round(Number(auth.captured_cents) / 100),
+      );
       expect((await pocket()).holdsCents).toBe(0);
     });
 
@@ -160,7 +163,8 @@ describe.each(harnesses().map((h) => [h.name, h] as const))("%s store", (_name, 
       const rs = await Promise.all([refund("re_a"), refund("re_b")]);
       done();
       expect(codes(rs)).toEqual(["ok", "refund_rejected"]);
-      expect((await pocket()).postedCents).toBe(250_000 - 5_000 + 3_000);
+      // -5_000 captured +50 cashback +3_000 refund -30 cashback reversed
+      expect((await pocket()).postedCents).toBe(250_000 - 5_000 + 50 + 3_000 - 30);
       expect(await trialBalance()).toBe(0);
     });
   });
@@ -317,13 +321,15 @@ describe.each(harnesses().map((h) => [h.name, h] as const))("%s store", (_name, 
         }),
         "invalid_state",
       );
-      expect((await pocket()).postedCents).toBe(250_000);
+      // -3_000 captured +30 cashback +3_000 provisional credit
+      expect((await pocket()).postedCents).toBe(250_030);
       expect(
         body(
           await app.call(as(ADMIN), "POST", `/admin/disputes/${d.id}/resolve`, { outcome: "won" }),
         ).status,
       ).toBe("won");
-      expect((await pocket()).postedCents).toBe(250_000);
+      // "won" keeps the provisional credit; balance unchanged
+      expect((await pocket()).postedCents).toBe(250_030);
       expect(await trialBalance()).toBe(0);
     });
   });
@@ -432,6 +438,7 @@ describe.each(harnesses().map((h) => [h.name, h] as const))("%s store", (_name, 
               { account: "customer_deposits", party: chk.id, debit: 0, credit: 500 },
             ],
           },
+          cashback: null,
         });
       expect(await refund()).toEqual({ duplicate: false, refundedCents: 500 });
       expect(await refund()).toEqual({ duplicate: true, refundedCents: 500 });

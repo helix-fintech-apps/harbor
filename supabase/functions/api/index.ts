@@ -70,6 +70,24 @@ async function verifyStripeSignature(
   return hex === parts.v1;
 }
 
+async function verifyHmacHex(
+  payload: string,
+  header: string | null,
+  secret: string | undefined,
+): Promise<boolean> {
+  if (!header || !secret) return false;
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload));
+  const hex = [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return hex === header.trim().toLowerCase();
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   const url = new URL(req.url);
@@ -111,6 +129,42 @@ Deno.serve(async (req) => {
         : { approved: false };
       // Respond synchronously to approve/decline the Stripe Issuing authorization.
       return json(200, { approved: decision.approved }, { "Stripe-Version": "2024-06-20" });
+    }
+    return json(200, { received: true });
+  }
+
+  // Zelle webhooks: returns/refunds come back here and reverse the original send (processed once).
+  if (path === "/webhooks/zelle" && req.method === "POST") {
+    const raw = await req.text();
+    if (!(await verifyHmacHex(raw, req.headers.get("zelle-signature"), env.ZELLE_WEBHOOK_SECRET)))
+      return json(400, { error: { code: "bad_signature" } });
+    const evt = JSON.parse(raw);
+    const { error: dup } = await admin
+      .from("provider_events")
+      .insert({ id: evt.id, provider: "zelle", type: evt.type });
+    if (dup) return json(200, { received: true, duplicate: true });
+    if (evt.type === "payment.returned" || evt.type === "payment.refunded") {
+      const d = evt.data ?? {};
+      let paymentId = d.reference as string | undefined;
+      if (!paymentId && d.providerPaymentId) {
+        const { data: pay } = await admin
+          .from("zelle_payments")
+          .select("id")
+          .eq("provider_payment_id", d.providerPaymentId)
+          .single();
+        paymentId = pay?.id;
+      }
+      if (paymentId) {
+        try {
+          await service.zelleReturn(null, paymentId, d.reason ?? "returned");
+        } catch (e) {
+          const err =
+            e instanceof ApiError ? e : new ApiError(500, "internal", (e as Error).message);
+          if (err.status >= 500) return json(err.status, { error: { code: err.code } });
+          // 4xx (e.g. already returned) is acknowledged so the provider stops retrying.
+        }
+      }
+      return json(200, { received: true });
     }
     return json(200, { received: true });
   }

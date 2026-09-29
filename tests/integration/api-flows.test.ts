@@ -275,7 +275,8 @@ describe.each(harnesses().map((h) => [h.name, h] as const))("%s store", (_name, 
       );
       expect(cap.capturedCents).toBe(5_900); // tip within 20%
       const chk = await checking();
-      expect([chk.postedCents, chk.availableCents]).toEqual([244_100, 244_100]);
+      // 250_000 - 5_900 captured + 59 (1% cashback on the settled spend)
+      expect([chk.postedCents, chk.availableCents]).toEqual([244_159, 244_159]);
       const r1 = body(
         await app.call(as(AVA), "POST", `/sim/authorizations/${a.authorizationId}/refund`, {
           refundId: "re_1",
@@ -289,7 +290,8 @@ describe.each(harnesses().map((h) => [h.name, h] as const))("%s store", (_name, 
         }),
       );
       expect([r1.duplicate, r2.duplicate]).toEqual([false, true]);
-      expect((await checking()).postedCents).toBe(245_000);
+      // 244_159 after capture + 900 refund - 9 (1% cashback reversed on the refund)
+      expect((await checking()).postedCents).toBe(245_050);
     });
     it("frozen card declines; auth expiry releases the hold", async () => {
       const card = (await me()).cards[0];
@@ -393,9 +395,11 @@ describe.each(harnesses().map((h) => [h.name, h] as const))("%s store", (_name, 
         ).error.code,
       ).toBe("dispute_rejected");
       await app.call(as(ADMIN), "POST", `/admin/disputes/${d.id}/provisional-credit`);
-      expect((await checking()).postedCents).toBe(250_000);
+      // 247_030 after capture (+30 cashback), then +3_000 provisional credit
+      expect((await checking()).postedCents).toBe(250_030);
       await app.call(as(ADMIN), "POST", `/admin/disputes/${d.id}/resolve`, { outcome: "lost" });
-      expect((await checking()).postedCents).toBe(247_000);
+      // lost reverses the 3_000 provisional credit; the 30 cashback stays
+      expect((await checking()).postedCents).toBe(247_030);
     });
     it("savings interest accrues daily and posts monthly with banker's rounding", async () => {
       await app.call(as(AVA), "POST", "/transfers/pocket", {

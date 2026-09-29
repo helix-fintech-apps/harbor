@@ -112,22 +112,30 @@ export interface MoneyOps {
     holdId: string | null;
     replayed: boolean;
   }>;
-  /** Capture (partial / over-capture within tolerance): ledger + hold consumed + auth captured. */
+  /**
+   * Capture (partial / over-capture within tolerance): ledger + hold consumed + auth captured.
+   * `cashback`, when present, credits 1% of the captured spend to the card's account in the same txn.
+   */
   cardCapture(p: {
     authId: string;
     capturedCents: number;
     feeCents: number;
     ledger: LedgerPost;
+    cashback: LedgerPost | null;
     at: string;
   }): Promise<void>;
   /** Expire an uncaptured auth past its validity and release its hold. false = not expirable. */
   cardExpireAuth(p: { authId: string; at: string }): Promise<boolean>;
-  /** Merchant refund, once per refund id, never above captured - refunded. */
+  /**
+   * Merchant refund, once per refund id, never above captured - refunded.
+   * `cashback`, when present, reverses the proportional 1% cashback out of the card's account.
+   */
   cardRefund(p: {
     refundId: string;
     authId: string;
     amountCents: number;
     ledger: LedgerPost;
+    cashback: LedgerPost | null;
     at: string;
   }): Promise<{ duplicate: boolean; refundedCents: number }>;
   /** Open a dispute on a captured purchase (one open dispute per purchase). Returns the row. */
@@ -157,6 +165,40 @@ export interface MoneyOps {
     actorId: string | null;
     audit: Row;
   }): Promise<{ canceledCardIds: string[] }>;
+  /**
+   * Auto-close a temporary envelope: sweep its remaining balance into the primary checking pocket
+   * and close it, in one txn. Re-checks the envelope balance (compare-and-set) so a deposit that
+   * lands just before close is not stranded. An already-closed envelope is a no-op.
+   */
+  envelopeSweepClose(p: {
+    userId: string;
+    envelopeAccountId: string;
+    checkingAccountId: string;
+    expectedRemainingCents: number;
+    transfer: Row | null;
+    ledger: LedgerPost | null;
+    at: string;
+  }): Promise<{ closed: boolean; sweptCents: number }>;
+  /**
+   * Zelle send funded from one or more of the user's own accounts (source first, then the shortfall
+   * from other accounts). Locks each funding account and re-checks its available balance.
+   */
+  zelleSend(p: {
+    userId: string;
+    payment: Row;
+    funding: { accountId: string; cents: number }[];
+    ledger: LedgerPost;
+    at: string;
+  }): Promise<{ replayed: boolean }>;
+  /** Zelle return/refund: reverse a sent payment back to the accounts that funded it (once). */
+  zelleReturn(p: {
+    paymentId: string;
+    reason: string;
+    ledger: LedgerPost;
+    at: string;
+    actorId: string | null;
+    audit: Row;
+  }): Promise<{ reversed: boolean }>;
 }
 
 export interface Store extends MoneyOps {
@@ -661,6 +703,7 @@ export class MemoryStore implements Store {
     capturedCents: number;
     feeCents: number;
     ledger: LedgerPost;
+    cashback: LedgerPost | null;
     at: string;
   }) {
     return this.tx(() => {
@@ -685,6 +728,11 @@ export class MemoryStore implements Store {
         fee_cents: p.feeCents,
         captured_at: p.at,
       });
+      if (p.cashback) {
+        if (netDebit(p.cashback, "cashback_expense", null) <= 0)
+          fail("payload_mismatch", "cashback must be funded from cashback_expense");
+        this.post(p.cashback, p.at);
+      }
     });
   }
 
@@ -703,6 +751,7 @@ export class MemoryStore implements Store {
     authId: string;
     amountCents: number;
     ledger: LedgerPost;
+    cashback: LedgerPost | null;
     at: string;
   }) {
     return this.tx(() => {
@@ -733,6 +782,11 @@ export class MemoryStore implements Store {
         created_at: p.at,
       });
       this.post(p.ledger, p.at);
+      if (p.cashback) {
+        if (netDebit(p.cashback, "cashback_expense", null) >= 0)
+          fail("payload_mismatch", "cashback reversal must credit cashback_expense");
+        this.post(p.cashback, p.at);
+      }
       a.refunded_cents = Number(a.refunded_cents) + p.amountCents;
       return { duplicate: false, refundedCents: a.refunded_cents as number };
     });
@@ -936,6 +990,115 @@ export class MemoryStore implements Store {
       return { canceledCardIds: canceledCardIds.sort() };
     });
   }
+
+  envelopeSweepClose(p: {
+    userId: string;
+    envelopeAccountId: string;
+    checkingAccountId: string;
+    expectedRemainingCents: number;
+    transfer: Row | null;
+    ledger: LedgerPost | null;
+    at: string;
+  }) {
+    return this.tx(() => {
+      const env = this.row("accounts", { id: p.envelopeAccountId });
+      if (!env || env.user_id !== p.userId || env.kind !== "envelope")
+        return fail("not_found", "envelope not found");
+      if (env.status === "closed") return { closed: false, sweptCents: 0 };
+      const remaining = this.posted("customer_deposits", p.envelopeAccountId);
+      if (remaining !== p.expectedRemainingCents)
+        fail("closure_state_changed", "the envelope balance changed while closing");
+      if (this.activeHolds((h) => h.account_id === p.envelopeAccountId, p.at) > 0)
+        fail("closure_state_changed", "the envelope has pending holds");
+      if (remaining > 0) {
+        if (!p.ledger || !p.transfer)
+          fail("payload_mismatch", "a non-empty envelope needs a sweep ledger and transfer");
+        const chk = this.row("accounts", { id: p.checkingAccountId });
+        if (!chk || chk.user_id !== p.userId || chk.status !== "open")
+          fail("not_found", "primary checking account not found");
+        if (
+          netDebit(p.ledger, "customer_deposits", p.envelopeAccountId) !== remaining ||
+          netDebit(p.ledger, "customer_deposits", p.checkingAccountId) !== -remaining
+        )
+          fail("payload_mismatch", "the sweep must move the whole balance into checking");
+        this.post(p.ledger!, p.at);
+        this.put("transfers", { fee_cents: 0, new_payee: false, created_at: p.at, ...p.transfer });
+      }
+      if (this.posted("customer_deposits", p.envelopeAccountId) !== 0)
+        fail("payload_mismatch", "the envelope must be empty after the sweep");
+      this.patch("accounts", { id: p.envelopeAccountId }, { status: "closed", closed_at: p.at });
+      return { closed: true, sweptCents: remaining };
+    });
+  }
+
+  zelleSend(p: {
+    userId: string;
+    payment: Row;
+    funding: { accountId: string; cents: number }[];
+    ledger: LedgerPost;
+    at: string;
+  }) {
+    return this.tx(() => {
+      if (this.row("zelle_payments", { id: p.payment.id })) return { replayed: true };
+      const amount = Number(p.payment.amount_cents);
+      const legTotal = p.funding.reduce((s, l) => s + Number(l.cents), 0);
+      if (legTotal !== amount)
+        fail("payload_mismatch", "the funding legs must sum to the payment amount");
+      if (netDebit(p.ledger, "zelle_clearing", null) !== -amount)
+        fail("payload_mismatch", "a Zelle send credits zelle_clearing the full amount");
+      for (const l of p.funding) {
+        const acct = this.row("accounts", { id: l.accountId });
+        if (!acct || acct.user_id !== p.userId) fail("not_found", "funding account not found");
+        if (acct!.status !== "open") fail("closure_state_changed", "a funding account is not open");
+        if (netDebit(p.ledger, "customer_deposits", l.accountId) !== Number(l.cents))
+          fail("payload_mismatch", "each funding leg must debit its account for its share");
+        const avail = this.available(l.accountId, p.at);
+        if (Number(l.cents) > avail)
+          fail("insufficient_funds", `available ${avail} on ${l.accountId}, needed ${l.cents}`);
+      }
+      this.put("zelle_payments", { status: "sent", created_at: p.at, ...p.payment });
+      this.post(p.ledger, p.at);
+      return { replayed: false };
+    });
+  }
+
+  zelleReturn(p: {
+    paymentId: string;
+    reason: string;
+    ledger: LedgerPost;
+    at: string;
+    actorId: string | null;
+    audit: Row;
+  }) {
+    return this.tx(() => {
+      const pay = this.row("zelle_payments", { id: p.paymentId });
+      if (!pay) return fail("not_found", "Zelle payment not found");
+      if (pay.status === "returned") fail("already_returned", "payment already returned");
+      const amount = Number(pay.amount_cents);
+      if (netDebit(p.ledger, "zelle_clearing", null) !== amount)
+        fail("payload_mismatch", "a return debits zelle_clearing the full amount");
+      let credited = 0;
+      for (const l of (pay.funded_from ?? []) as { accountId: string; cents: number }[]) {
+        if (netDebit(p.ledger, "customer_deposits", l.accountId) !== -Number(l.cents))
+          fail("payload_mismatch", "a return credits each funding account what it paid");
+        credited += Number(l.cents);
+      }
+      if (credited !== amount)
+        fail("payload_mismatch", "the return credits must equal the payment amount");
+      this.post(p.ledger, p.at);
+      Object.assign(pay, { status: "returned", return_reason: p.reason, returned_at: p.at });
+      this.put("audit_log", {
+        actor_id: p.actorId,
+        action: "zelle_return",
+        entity: "zelle_payment",
+        entity_id: p.paymentId,
+        reason: p.reason,
+        data: p.audit,
+        created_at: p.at,
+      });
+      return { reversed: true };
+    });
+  }
 }
 
 /**
@@ -1123,6 +1286,7 @@ export class SupabaseStore implements Store {
     capturedCents: number;
     feeCents: number;
     ledger: LedgerPost;
+    cashback: LedgerPost | null;
     at: string;
   }) {
     await this.rpc("harbor_card_capture", {
@@ -1130,6 +1294,7 @@ export class SupabaseStore implements Store {
       p_captured_cents: p.capturedCents,
       p_fee_cents: p.feeCents,
       p_ledger: SupabaseStore.ledgerArg(p.ledger),
+      p_cashback: SupabaseStore.ledgerArg(p.cashback),
       p_at: p.at,
     });
   }
@@ -1141,6 +1306,7 @@ export class SupabaseStore implements Store {
     authId: string;
     amountCents: number;
     ledger: LedgerPost;
+    cashback: LedgerPost | null;
     at: string;
   }) {
     const r = await this.rpc<{ duplicate: boolean; refunded_cents: number }>("harbor_card_refund", {
@@ -1148,6 +1314,7 @@ export class SupabaseStore implements Store {
       p_auth_id: p.authId,
       p_amount_cents: p.amountCents,
       p_ledger: SupabaseStore.ledgerArg(p.ledger),
+      p_cashback: SupabaseStore.ledgerArg(p.cashback),
       p_at: p.at,
     });
     return { duplicate: !!r.duplicate, refundedCents: Number(r.refunded_cents) };
@@ -1213,5 +1380,62 @@ export class SupabaseStore implements Store {
       p_audit: p.audit,
     });
     return { canceledCardIds: r.canceled_card_ids ?? [] };
+  }
+  async envelopeSweepClose(p: {
+    userId: string;
+    envelopeAccountId: string;
+    checkingAccountId: string;
+    expectedRemainingCents: number;
+    transfer: Row | null;
+    ledger: LedgerPost | null;
+    at: string;
+  }) {
+    const r = await this.rpc<{ closed: boolean; swept_cents: number }>(
+      "harbor_envelope_sweep_close",
+      {
+        p_user_id: p.userId,
+        p_envelope_account_id: p.envelopeAccountId,
+        p_checking_account_id: p.checkingAccountId,
+        p_expected_remaining_cents: p.expectedRemainingCents,
+        p_transfer: p.transfer,
+        p_ledger: SupabaseStore.ledgerArg(p.ledger),
+        p_at: p.at,
+      },
+    );
+    return { closed: !!r.closed, sweptCents: Number(r.swept_cents) };
+  }
+  async zelleSend(p: {
+    userId: string;
+    payment: Row;
+    funding: { accountId: string; cents: number }[];
+    ledger: LedgerPost;
+    at: string;
+  }) {
+    const r = await this.rpc<{ replayed: boolean }>("harbor_zelle_send", {
+      p_user_id: p.userId,
+      p_payment: p.payment,
+      p_funding: p.funding.map((l) => ({ account_id: l.accountId, cents: l.cents })),
+      p_ledger: SupabaseStore.ledgerArg(p.ledger),
+      p_at: p.at,
+    });
+    return { replayed: !!r.replayed };
+  }
+  async zelleReturn(p: {
+    paymentId: string;
+    reason: string;
+    ledger: LedgerPost;
+    at: string;
+    actorId: string | null;
+    audit: Row;
+  }) {
+    const r = await this.rpc<{ reversed: boolean }>("harbor_zelle_return", {
+      p_payment_id: p.paymentId,
+      p_reason: p.reason,
+      p_ledger: SupabaseStore.ledgerArg(p.ledger),
+      p_at: p.at,
+      p_actor: p.actorId,
+      p_audit: p.audit,
+    });
+    return { reversed: !!r.reversed };
   }
 }

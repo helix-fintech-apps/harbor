@@ -66,6 +66,18 @@ add("POST", "/transfers/ach-in", (s, c, _p, b) => s.achIn(c, b));
 add("POST", "/transfers/ach-out", (s, c, _p, b) => s.achOut(c, b));
 add("POST", "/transfers/p2p", (s, c, _p, b) => s.p2p(c, b));
 add("POST", "/transfers/pocket", (s, c, _p, b) => s.pocketMove(c, b));
+add("POST", "/transfers/internal", (s, c, _p, b) => s.internalTransfer(c, b));
+add("POST", "/transfers/zelle", (s, c, _p, b) => s.zellePay(c, b));
+add("POST", "/transfers/zelle/:id/cancel", (s, c, p) => s.cancelZelleSchedule(c, p.id));
+
+// On-demand accounts (checking / savings / temporary envelope with start + end date).
+add("POST", "/accounts", (s, c, _p, b) => s.openAccount(c, b));
+
+// Shared households.
+add("POST", "/household", (s, c, _p, b) => s.createHousehold(c, b));
+add("POST", "/household/invite", (s, c, _p, b) => s.inviteHousehold(c, b));
+add("POST", "/household/accept", (s, c, _p, b) => s.acceptHousehold(c, b ?? {}));
+add("POST", "/household/cap", (s, c, _p, b) => s.setHouseholdCap(c, b));
 add("POST", "/cards", (s, c, _p, b) => s.issueCard(c, b));
 add("POST", "/cards/:id/freeze", (s, c, p) => s.setCardStatus(c, p.id, "frozen"));
 add("POST", "/cards/:id/unfreeze", (s, c, p) => s.setCardStatus(c, p.id, "active"));
@@ -105,6 +117,7 @@ add("POST", "/admin/accounts/:id/unfreeze", (s, c, p, b) =>
   s.adminSetAccountStatus(c, p.id, "open", b?.reason),
 );
 add("POST", "/admin/transfers/:id/return", (s, c, p, b) => s.achReturn(c, p.id, b?.code));
+add("POST", "/admin/zelle/:id/return", (s, c, p, b) => s.zelleReturn(c, p.id, b?.reason));
 add("GET", "/admin/disputes", (s, c) => s.adminDisputes(c));
 add("POST", "/admin/disputes/:id/provisional-credit", (s, c, p) => s.provisionalCredit(c, p.id));
 add("POST", "/admin/disputes/:id/resolve", (s, c, p, b) => s.resolveDispute(c, p.id, b?.outcome));
@@ -112,6 +125,8 @@ add("GET", "/admin/ledger", (s, c, _p, _b, q) => s.adminLedger(c, q.limit ? Numb
 add("GET", "/admin/audit", (s, c) => s.adminAudit(c));
 add("POST", "/admin/jobs/settle-ach", (s, c) => s.settleAch(c));
 add("POST", "/admin/jobs/expire-auths", (s, c) => s.expireAuths(c));
+add("POST", "/admin/jobs/sweep-envelopes", (s, c) => s.sweepEnvelopes(c));
+add("POST", "/admin/jobs/zelle-recurring", (s, c) => s.runZelleRecurring(c));
 add("POST", "/admin/jobs/dispute-deadlines", (s, c) => s.disputeDeadlines(c));
 add("POST", "/admin/jobs/accrue-interest", (s, c, _p, b) => s.accrueInterest(c, b?.day));
 add("POST", "/admin/jobs/post-interest", (s, c, _p, b) => s.postInterest(c, b?.period));

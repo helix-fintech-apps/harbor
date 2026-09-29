@@ -42,6 +42,16 @@ export interface MoneyPolicy {
     teenRequiresGuardianApproval: boolean;
     maxMembers: number;
   };
+  // Household money hub: shared households, on-demand accounts, per-card limits, debit cashback.
+  household: {
+    maxMembers: number; // people in a shared household, including the owner
+  };
+  onDemandAccounts: {
+    maxOpenPerUser: number; // total open pockets per user (checking + savings + envelopes)
+  };
+  cashback: {
+    debitBps: number; // reward on settled debit-card spend (100 bps = 1%), reversed on refund
+  };
   disputes: {
     windowDays: number; // days after posting a cardholder may dispute
     provisionalCreditBusinessDays: number;
@@ -103,6 +113,9 @@ export const DEFAULT_POLICY: MoneyPolicy = {
     maxActiveVirtualCards: 3,
   },
   family: { teenRequiresGuardianApproval: true, maxMembers: 5 },
+  household: { maxMembers: 8 },
+  onDemandAccounts: { maxOpenPerUser: 20 },
+  cashback: { debitBps: 100 }, // 1%
   disputes: {
     windowDays: 60,
     provisionalCreditBusinessDays: 10,

@@ -7,9 +7,10 @@ import type { KycState } from "./kyc.ts";
 import { canMoveMoney } from "./kyc.ts";
 import { checkLimit, type UsageEvent } from "./limits.ts";
 import { applyBps } from "./money.ts";
-import { addDays } from "./time.ts";
+import { addDays, startOfUtcDay, startOfUtcMonth } from "./time.ts";
 import { cr, dr, txn, type LedgerAccount, type Txn } from "./ledger.ts";
-import { checkFamilySpend, type FamilyMember } from "./family.ts";
+import { checkFamilySpend, type FamilyMember, type SpendLimits } from "./family.ts";
+import { withinHouseholdCap } from "./household.ts";
 
 export type CardKind = "virtual" | "physical";
 export type CardStatus = "requested" | "active" | "frozen" | "canceled" | "replaced";
@@ -85,7 +86,11 @@ export type DeclineReason =
   | "per_txn_limit"
   | "member_daily_limit"
   | "member_monthly_limit"
-  | "allowance_exceeded";
+  | "allowance_exceeded"
+  | "card_per_txn_limit"
+  | "card_daily_limit"
+  | "card_monthly_limit"
+  | "household_monthly_cap";
 
 export interface AuthRequest {
   amountCents: number;
@@ -106,6 +111,10 @@ export interface AuthContext {
   member?: FamilyMember;
   memberSpend?: UsageEvent[]; // card_spend events for this family member
   allowanceAvailableCents?: number; // teen allowance pocket
+  cardLimits?: SpendLimits; // optional per-card per-txn / daily / monthly limits
+  cardSpend?: UsageEvent[]; // card_spend events on THIS card (purchase amounts)
+  householdCapCents?: number | null; // household overall monthly cap (null / undefined = none)
+  householdSpendCents?: number; // household card spend so far this month (excludes this request)
   now: Date;
 }
 
@@ -166,6 +175,11 @@ export function authorize(
     }
   }
 
+  if (ctx.cardLimits) {
+    const cl = checkCardLimits(ctx.cardLimits, req.amountCents, ctx.cardSpend ?? [], ctx.now);
+    if (!cl.ok) return no(cl.reason);
+  }
+
   const lim = checkLimit(
     ctx.ownerTier,
     "card_spend",
@@ -175,6 +189,11 @@ export function authorize(
     policy,
   );
   if (!lim.ok) return no(lim.reason!);
+  if (
+    ctx.householdCapCents !== undefined &&
+    !withinHouseholdCap(ctx.householdCapCents, ctx.householdSpendCents ?? 0, req.amountCents)
+  )
+    return no("household_monthly_cap");
   if (funding.account === "customer_deposits" && need > ctx.availableCents)
     return no("insufficient_funds");
 
@@ -185,6 +204,83 @@ export function authorize(
     expiresAt: addDays(ctx.now, policy.cards.authValidityDays),
     funding,
   };
+}
+
+/** Windowed card-spend totals (UTC day / calendar month), counting only events at or before `now`. */
+function windowedCardSpend(events: UsageEvent[], now: Date): { today: number; month: number } {
+  const day = startOfUtcDay(now).getTime();
+  const month = startOfUtcMonth(now).getTime();
+  const n = now.getTime();
+  let today = 0;
+  let mon = 0;
+  for (const e of events) {
+    if (e.kind !== "card_spend") continue;
+    const t = e.at.getTime();
+    if (t > n) continue;
+    if (t >= month) mon += e.amountCents;
+    if (t >= day) today += e.amountCents;
+  }
+  return { today, month: mon };
+}
+
+/** Per-card per-transaction / daily / monthly limits (inclusive boundaries). */
+export function checkCardLimits(
+  limits: SpendLimits,
+  amountCents: number,
+  cardSpend: UsageEvent[],
+  now: Date,
+):
+  | { ok: true; reason?: undefined }
+  | { ok: false; reason: "card_per_txn_limit" | "card_daily_limit" | "card_monthly_limit" } {
+  if (amountCents > limits.perTxnCents) return { ok: false, reason: "card_per_txn_limit" };
+  const { today, month } = windowedCardSpend(cardSpend, now);
+  if (today + amountCents > limits.dailyCents) return { ok: false, reason: "card_daily_limit" };
+  if (month + amountCents > limits.monthlyCents) return { ok: false, reason: "card_monthly_limit" };
+  return { ok: true };
+}
+
+// ---------- cashback (1% of settled debit spend, reversed on refund) ----------
+
+/** Cashback earned when `capturedCents` settles (half-up rounding of the policy rate). */
+export function cashbackEarned(capturedCents: number, policy: MoneyPolicy): number {
+  if (capturedCents <= 0) return 0;
+  return applyBps(capturedCents, policy.cashback.debitBps);
+}
+
+/**
+ * Cashback to claw back for a refund. Reversing on the running refunded total keeps the amount
+ * reversed at exactly 1% of everything refunded, so a full refund reverses all earned cashback and
+ * partial refunds never over-reverse (rounding is applied to the cumulative total, then differenced).
+ */
+export function cashbackReversal(
+  refundedSoFarCents: number,
+  refundCents: number,
+  policy: MoneyPolicy,
+): number {
+  const bps = policy.cashback.debitBps;
+  return applyBps(refundedSoFarCents + refundCents, bps) - applyBps(refundedSoFarCents, bps);
+}
+
+/** Ledger for cashback credited to the card's account (Harbor funds it via cashback_expense). */
+export function cashbackTxn(cardAccountId: string, cashbackCents: number, authId: string): Txn {
+  return txn(
+    "card_cashback",
+    [dr("cashback_expense", cashbackCents), cr("customer_deposits", cashbackCents, cardAccountId)],
+    `cashback:${authId}`,
+  );
+}
+
+/** Ledger reversing cashback out of the card's account when a purchase is refunded. */
+export function cashbackReversalTxn(
+  cardAccountId: string,
+  cashbackCents: number,
+  refundId: string,
+): Txn {
+  return txn(
+    "card_cashback_reversal",
+    [dr("customer_deposits", cashbackCents, cardAccountId), cr("cashback_expense", cashbackCents)],
+    `cashback_reversal:${refundId}`,
+  );
 }
 
 /** Maximum a merchant may capture against an authorization (tips / fuel tolerance). */
