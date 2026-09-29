@@ -37,10 +37,21 @@ export interface MoneyPolicy {
     fuelMaxCaptureCents: number; // fuel pumps authorize small, capture up to this
     velocity: { maxAuths: number; windowMinutes: number };
     maxActiveVirtualCards: number;
+    cashbackBps: number; // rewards on captured debit-card spend, credited to the card's account
   };
   family: {
     teenRequiresGuardianApproval: boolean;
     maxMembers: number;
+  };
+  household: {
+    maxMembers: number; // invited members beyond the owner
+  };
+  zelle: {
+    minCents: number; // smallest Zelle payment
+    maxRecurring: number; // active recurring schedules per user
+  };
+  accounts: {
+    maxOpenPerUser: number; // open pockets a user may hold at once (all kinds)
   };
   disputes: {
     windowDays: number; // days after posting a cardholder may dispute
@@ -101,8 +112,12 @@ export const DEFAULT_POLICY: MoneyPolicy = {
     fuelMaxCaptureCents: 17_500,
     velocity: { maxAuths: 5, windowMinutes: 10 },
     maxActiveVirtualCards: 3,
+    cashbackBps: 100, // 1%
   },
   family: { teenRequiresGuardianApproval: true, maxMembers: 5 },
+  household: { maxMembers: 8 },
+  zelle: { minCents: 100, maxRecurring: 20 },
+  accounts: { maxOpenPerUser: 20 },
   disputes: {
     windowDays: 60,
     provisionalCreditBusinessDays: 10,

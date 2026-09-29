@@ -31,7 +31,8 @@ test("dispute a card purchase: provisional credit shows on the dispute and the b
   await page.getByTestId("dispute-submit").click();
   await expect(page.getByTestId("dispute-error")).toHaveAttribute("data-code", "dispute_rejected");
   await nav(page, "accounts");
-  await expectCents(page.getByTestId("checking-posted"), 247_000);
+  // $30 purchase also earned $0.30 of 1% cashback at capture.
+  await expectCents(page.getByTestId("checking-posted"), 247_030);
 
   // Staff give provisional credit (due within 10 business days of the notice).
   await signOut(page);
@@ -43,7 +44,7 @@ test("dispute a card purchase: provisional credit shows on the dispute and the b
 
   await signOut(page);
   await signIn(page, "ava@harbor.test");
-  await expectCents(page.getByTestId("checking-posted"), 250_000);
+  await expectCents(page.getByTestId("checking-posted"), 250_030); // $250k + the $0.30 cashback
   await nav(page, "disputes");
   await expect(row.getByTestId("dispute-status")).toHaveText("provisional credited");
   await expectCents(row.getByTestId("dispute-provisional"), 3_000);

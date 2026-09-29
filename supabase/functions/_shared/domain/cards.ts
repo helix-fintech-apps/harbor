@@ -7,7 +7,7 @@ import type { KycState } from "./kyc.ts";
 import { canMoveMoney } from "./kyc.ts";
 import { checkLimit, type UsageEvent } from "./limits.ts";
 import { applyBps } from "./money.ts";
-import { addDays } from "./time.ts";
+import { addDays, startOfUtcDay, startOfUtcMonth } from "./time.ts";
 import { cr, dr, txn, type LedgerAccount, type Txn } from "./ledger.ts";
 import { checkFamilySpend, type FamilyMember } from "./family.ts";
 
@@ -22,6 +22,22 @@ export interface Card {
   kind: CardKind;
   status: CardStatus;
   last4: string;
+}
+
+/** Optional per-card spend limits, set when the card is created or updated. null = no card-level cap. */
+export interface CardLimits {
+  perTxnCents: number;
+  dailyCents: number;
+  monthlyCents: number;
+}
+
+export function validateCardLimits(l: CardLimits): string[] {
+  const e: string[] = [];
+  for (const [k, v] of Object.entries(l))
+    if (!Number.isSafeInteger(v) || v < 0) e.push(`${k} must be non-negative cents`);
+  if (l.perTxnCents > l.dailyCents) e.push("perTxn cannot exceed daily");
+  if (l.dailyCents > l.monthlyCents) e.push("daily cannot exceed monthly");
+  return e;
 }
 
 const CARD_TRANSITIONS: Record<CardStatus, CardStatus[]> = {
@@ -85,7 +101,11 @@ export type DeclineReason =
   | "per_txn_limit"
   | "member_daily_limit"
   | "member_monthly_limit"
-  | "allowance_exceeded";
+  | "allowance_exceeded"
+  | "card_per_txn_limit"
+  | "card_daily_limit"
+  | "card_monthly_limit"
+  | "household_cap";
 
 export interface AuthRequest {
   amountCents: number;
@@ -106,7 +126,44 @@ export interface AuthContext {
   member?: FamilyMember;
   memberSpend?: UsageEvent[]; // card_spend events for this family member
   allowanceAvailableCents?: number; // teen allowance pocket
+  cardLimits?: CardLimits; // optional per-card spend limits
+  cardSpend?: UsageEvent[]; // card_spend events on THIS card (for its daily/monthly limits)
+  householdCapCents?: number; // household overall monthly spend cap, if the card is in a household with one
+  householdMonthCents?: number; // household card spend already used this UTC month
   now: Date;
+}
+
+/** Sum card_spend within the current UTC day and month (used for per-card and household windows). */
+export function spendWindow(spend: UsageEvent[], now: Date): { today: number; month: number } {
+  const day = startOfUtcDay(now).getTime();
+  const month = startOfUtcMonth(now).getTime();
+  let today = 0,
+    mon = 0;
+  for (const e of spend) {
+    if (e.kind !== "card_spend") continue;
+    const t = e.at.getTime();
+    if (t > now.getTime()) continue;
+    if (t >= month) mon += e.amountCents;
+    if (t >= day) today += e.amountCents;
+  }
+  return { today, month: mon };
+}
+
+/** Per-card limits (inclusive): per-transaction on the amount, daily/monthly on this card's spend. */
+export function checkCardLimits(
+  limits: CardLimits,
+  amountCents: number,
+  cardSpend: UsageEvent[],
+  now: Date,
+):
+  | { ok: true }
+  | { ok: false; reason: "card_per_txn_limit" | "card_daily_limit" | "card_monthly_limit" } {
+  if (amountCents > limits.perTxnCents) return { ok: false, reason: "card_per_txn_limit" };
+  const w = spendWindow(cardSpend, now);
+  if (w.today + amountCents > limits.dailyCents) return { ok: false, reason: "card_daily_limit" };
+  if (w.month + amountCents > limits.monthlyCents)
+    return { ok: false, reason: "card_monthly_limit" };
+  return { ok: true };
 }
 
 export type AuthDecision =
@@ -166,6 +223,11 @@ export function authorize(
     }
   }
 
+  if (ctx.cardLimits) {
+    const cl = checkCardLimits(ctx.cardLimits, req.amountCents, ctx.cardSpend ?? [], ctx.now);
+    if (!cl.ok) return no(cl.reason);
+  }
+
   const lim = checkLimit(
     ctx.ownerTier,
     "card_spend",
@@ -175,6 +237,13 @@ export function authorize(
     policy,
   );
   if (!lim.ok) return no(lim.reason!);
+
+  // Household-wide monthly cap across every member and card in the household.
+  if (ctx.householdCapCents !== undefined) {
+    if ((ctx.householdMonthCents ?? 0) + req.amountCents > ctx.householdCapCents)
+      return no("household_cap");
+  }
+
   if (funding.account === "customer_deposits" && need > ctx.availableCents)
     return no("insufficient_funds");
 
@@ -298,4 +367,65 @@ export function fakeLast4(seed: string): string {
   let h = 0;
   for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
   return String(h % 10_000).padStart(4, "0");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Cashback: 1% of captured debit-card spend, credited to the card's own account. A later refund
+// reverses cashback in proportion to the refunded amount (a full refund reverses it in full).
+// ---------------------------------------------------------------------------------------------
+
+export function cashbackFor(capturedCents: number, policy: MoneyPolicy): number {
+  if (capturedCents <= 0) return 0;
+  return applyBps(capturedCents, policy.cards.cashbackBps);
+}
+
+/** Plan the cashback for a captured purchase. Credited to the card's account (not the funding pocket). */
+export function planCashback(
+  p: { cashbackId: string; cardAccountId: string; capturedCents: number },
+  policy: MoneyPolicy,
+): { cashbackCents: number; ledger?: Txn } {
+  const cashbackCents = cashbackFor(p.capturedCents, policy);
+  if (cashbackCents <= 0) return { cashbackCents: 0 };
+  return {
+    cashbackCents,
+    ledger: txn(
+      "cashback",
+      [
+        dr("cashback_expense", cashbackCents),
+        cr("customer_deposits", cashbackCents, p.cardAccountId),
+      ],
+      p.cashbackId,
+    ),
+  };
+}
+
+/**
+ * Plan the cashback reversal for a refund. Reverses 1% of the refunded amount, never more than the
+ * cashback still standing (earned - already reversed), so refunds can never claw back more than paid.
+ */
+export function planCashbackReversal(
+  p: {
+    reversalId: string;
+    cardAccountId: string;
+    refundAmountCents: number;
+    cashbackEarnedCents: number;
+    cashbackReversedCents: number;
+  },
+  policy: MoneyPolicy,
+): { reverseCents: number; ledger?: Txn } {
+  const want = cashbackFor(p.refundAmountCents, policy);
+  const remaining = Math.max(0, p.cashbackEarnedCents - p.cashbackReversedCents);
+  const reverseCents = Math.min(want, remaining);
+  if (reverseCents <= 0) return { reverseCents: 0 };
+  return {
+    reverseCents,
+    ledger: txn(
+      "cashback_reversal",
+      [
+        dr("customer_deposits", reverseCents, p.cardAccountId),
+        cr("cashback_expense", reverseCents),
+      ],
+      p.reversalId,
+    ),
+  };
 }

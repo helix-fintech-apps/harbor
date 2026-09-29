@@ -66,7 +66,26 @@ add("POST", "/transfers/ach-in", (s, c, _p, b) => s.achIn(c, b));
 add("POST", "/transfers/ach-out", (s, c, _p, b) => s.achOut(c, b));
 add("POST", "/transfers/p2p", (s, c, _p, b) => s.p2p(c, b));
 add("POST", "/transfers/pocket", (s, c, _p, b) => s.pocketMove(c, b));
+add("POST", "/transfers/internal", (s, c, _p, b) => s.internalTransfer(c, b));
+
+// On-demand accounts (extra checking / savings pockets and temporary envelopes)
+add("POST", "/accounts", (s, c, _p, b) => s.openAccount(c, b));
+
+// Zelle bill pay (one-time + recurring weekly/monthly, with automatic shortfall pull)
+add("POST", "/zelle/send", (s, c, _p, b) => s.zelleSend(c, b));
+add("POST", "/zelle/schedules", (s, c, _p, b) => s.zelleScheduleCreate(c, b));
+add("POST", "/zelle/schedules/:id/cancel", (s, c, p) => s.zelleScheduleCancel(c, p.id));
+
+// Household
+add("GET", "/household", (s, c) => s.household(c));
+add("POST", "/household", (s, c, _p, b) => s.createHousehold(c, b));
+add("POST", "/household/cap", (s, c, _p, b) => s.setHouseholdCap(c, b));
+add("POST", "/household/members", (s, c, _p, b) => s.inviteMember(c, b));
+add("POST", "/household/members/:id/accept", (s, c, p) => s.acceptInvite(c, p.id));
+add("POST", "/household/members/:id/remove", (s, c, p) => s.removeMember(c, p.id));
+
 add("POST", "/cards", (s, c, _p, b) => s.issueCard(c, b));
+add("POST", "/cards/:id/limits", (s, c, p, b) => s.setCardLimits(c, p.id, b?.limits ?? null));
 add("POST", "/cards/:id/freeze", (s, c, p) => s.setCardStatus(c, p.id, "frozen"));
 add("POST", "/cards/:id/unfreeze", (s, c, p) => s.setCardStatus(c, p.id, "active"));
 add("POST", "/cards/:id/activate", (s, c, p) => s.setCardStatus(c, p.id, "active"));
@@ -93,6 +112,8 @@ add("POST", "/sim/authorizations/:id/capture", async (s, _c, p, b) =>
 add("POST", "/sim/authorizations/:id/refund", async (s, _c, p, b) =>
   s.merchantRefund(p.id, String(b?.refundId ?? ""), b?.amountCents),
 );
+// Zelle return/refund webhook (fake provider). Public, like a real provider webhook.
+add("POST", "/sim/zelle/webhook", (s, _c, _p, b) => s.zelleWebhook(b), { public: true });
 
 // Staff
 add("GET", "/admin/users", (s, c, _p, _b, q) => s.adminUsers(c, q.kyc));
@@ -112,6 +133,8 @@ add("GET", "/admin/ledger", (s, c, _p, _b, q) => s.adminLedger(c, q.limit ? Numb
 add("GET", "/admin/audit", (s, c) => s.adminAudit(c));
 add("POST", "/admin/jobs/settle-ach", (s, c) => s.settleAch(c));
 add("POST", "/admin/jobs/expire-auths", (s, c) => s.expireAuths(c));
+add("POST", "/admin/jobs/sweep-envelopes", (s, c) => s.sweepEnvelopes(c));
+add("POST", "/admin/jobs/run-zelle", (s, c) => s.runZelleSchedules(c));
 add("POST", "/admin/jobs/dispute-deadlines", (s, c) => s.disputeDeadlines(c));
 add("POST", "/admin/jobs/accrue-interest", (s, c, _p, b) => s.accrueInterest(c, b?.day));
 add("POST", "/admin/jobs/post-interest", (s, c, _p, b) => s.postInterest(c, b?.period));

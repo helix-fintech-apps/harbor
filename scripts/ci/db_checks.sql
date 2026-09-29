@@ -17,10 +17,10 @@ end $$;
 update profiles set role = 'admin' where id = '00000000-0000-0000-0000-0000000000ad';
 update profiles set kyc_state = 'approved' where id in ('00000000-0000-0000-0000-00000000000a','00000000-0000-0000-0000-00000000000b');
 
-insert into accounts (id, user_id, kind, account_number, policy_version) values
-  ('10000000-0000-0000-0000-00000000000a', '00000000-0000-0000-0000-00000000000a', 'checking', '880000000001', 1),
-  ('10000000-0000-0000-0000-0000000000a5', '00000000-0000-0000-0000-00000000000a', 'savings',  '880000000002', 1),
-  ('10000000-0000-0000-0000-00000000000b', '00000000-0000-0000-0000-00000000000b', 'checking', '880000000003', 1);
+insert into accounts (id, user_id, kind, account_number, is_primary, policy_version) values
+  ('10000000-0000-0000-0000-00000000000a', '00000000-0000-0000-0000-00000000000a', 'checking', '880000000001', true, 1),
+  ('10000000-0000-0000-0000-0000000000a5', '00000000-0000-0000-0000-00000000000a', 'savings',  '880000000002', true, 1),
+  ('10000000-0000-0000-0000-00000000000b', '00000000-0000-0000-0000-00000000000b', 'checking', '880000000003', true, 1);
 
 -- 1. Balanced txn via post_ledger_txn commits.
 select post_ledger_txn('ach_in', 't1', 'idem-1', '[{"account":"ach_clearing","debit":10000},{"account":"customer_deposits","party":"10000000-0000-0000-0000-00000000000a","credit":10000}]');
@@ -129,8 +129,19 @@ do $$ begin
   begin insert into disputes (auth_id, user_id, credit_account, credit_party, amount_cents, reason, status, provisional_credit_due_at, resolution_due_at, policy_version)
     values ('40000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', 'customer_deposits', '10000000-0000-0000-0000-00000000000a', 100, 'again', 'open', now(), now(), 1); raise exception 'SECOND OPEN DISPUTE';
   exception when unique_violation then null; end;
-  begin insert into accounts (user_id, kind, account_number, policy_version) values ('00000000-0000-0000-0000-00000000000a', 'checking', '880000000009', 1); raise exception 'SECOND CHECKING';
+  begin insert into accounts (user_id, kind, account_number, is_primary, policy_version) values ('00000000-0000-0000-0000-00000000000a', 'checking', '880000000009', true, 1); raise exception 'SECOND PRIMARY CHECKING';
   exception when unique_violation then null; end;
+  begin insert into accounts (user_id, kind, account_number, is_primary, policy_version) values ('00000000-0000-0000-0000-00000000000a', 'envelope', '880000000023', false, 1); raise exception 'ENVELOPE WITHOUT DATES';
+  exception when check_violation then null; end;
+  begin insert into accounts (user_id, kind, account_number, is_primary, envelope_start, envelope_end, policy_version) values ('00000000-0000-0000-0000-00000000000a', 'envelope', '880000000024', true, '2026-09-01', '2026-12-01', 1); raise exception 'PRIMARY ENVELOPE';
+  exception when check_violation then null; end;
+  -- On-demand accounts: an extra non-primary pocket and a dated envelope are allowed (rolled back so later counts are unchanged).
+  begin
+    insert into accounts (user_id, kind, account_number, is_primary, policy_version) values ('00000000-0000-0000-0000-00000000000a', 'checking', '880000000021', false, 1);
+    insert into accounts (user_id, kind, account_number, is_primary, envelope_start, envelope_end, policy_version) values ('00000000-0000-0000-0000-00000000000a', 'envelope', '880000000022', false, '2026-09-01', '2026-12-01', 1);
+    raise exception 'ondemand_ok';
+  exception when raise_exception then if sqlerrm <> 'ondemand_ok' then raise; end if;
+  end;
   begin insert into card_authorizations (card_id, amount_cents, mcc, merchant, status, funding_account, funding_party, expires_at)
     values ('30000000-0000-0000-0000-000000000001', 100, '5411', 'x', 'declined', 'customer_deposits', '10000000-0000-0000-0000-00000000000a', now()); raise exception 'DECLINE WITHOUT REASON';
   exception when check_violation then null; end;

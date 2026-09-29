@@ -68,7 +68,7 @@ States: `unverified → pending | needs_review | approved | rejected | frozen_le
 
 ### Accounts (`accounts.ts`)
 
-One live checking + one savings pocket per user, opened on KYC approval. Fake routing `091000019` (ABA-checksum valid), 12-digit account numbers `8800…`.
+One **primary** checking + savings pocket per user, opened on KYC approval. Fake routing `091000019` (ABA-checksum valid), 12-digit account numbers `8800…`. Users may open more pockets on demand (`POST /accounts`, up to `accounts.maxOpenPerUser`): extra checking/savings, or temporary **envelope** accounts. An envelope carries a `startDate`/`endDate` window; on the end date (inclusive, end-of-day UTC) the `sweep-envelopes` job auto-closes it and sweeps any remaining balance into the user's primary checking. Envelopes are never primary. Instant internal transfers (`POST /transfers/internal`) move money between any two of the user's own open accounts (not subject to tier limits).
 
 ### Money in (`achIn.ts`)
 
@@ -82,13 +82,16 @@ One live checking + one savings pocket per user, opened on KYC approval. Fake ro
 - ACH push standard: free, settles next business day. Instant: fee = 1.5% clamped to [$0.25, $15.00] (half-up rounding). Amount + fee ≤ available.
 - **Cooling-off**: no withdrawals to a bank linked < 72 h ago (exactly 72 h is allowed).
 - P2P to another approved Harbor user; min $1.00; not to self; **first payment to a new payee requires step-up** (fake code `000000`).
-- Pocket moves checking ↔ savings are not limited by tier.
+- Pocket moves and internal transfers between the user's own accounts are not limited by tier.
+- **Zelle bill pay** (`zelle.ts`): one-time and recurring (weekly/monthly) payments to an external handle (email or US phone), no fee, min $1.00. Funded from a source account; if the source is short at send time the shortfall is pulled from the user's other spendable accounts (checking/savings, **never an earmarked envelope**), source first. Zelle counts toward the transfer-out limit. Returns and refunds arrive as webhooks and are credited back to the source account, once per provider return id, never above the amount sent minus what already came back; a full return marks the payment `returned`.
 
 ### Debit cards (`cards.ts`)
 
 - Virtual: active instantly (max 3 live). Physical: `requested` until activated (max 1 live). Freeze ↔ unfreeze; replace (old → `replaced`, new card); cancel (terminal).
-- Authorization order of checks: amount → card status (frozen/canceled/replaced/requested) → account frozen → KYC → velocity (≥5 attempts in 10 min) → family rules → tier card limit → available balance (amount + fees).
+- Authorization order of checks: amount → card status (frozen/canceled/replaced/requested) → account frozen → KYC → velocity (≥5 attempts in 10 min) → family rules → **per-card limits** → tier card limit → **household cap** → available balance (amount + fees).
+- Cards may be created on demand with optional **per-card limits** (per-transaction / daily / monthly, per-txn ≤ daily ≤ monthly; inclusive), settable at issuance or via `POST /cards/:id/limits`.
 - Approved auth places a hold (amount + fees) for 7 days. Capture: partial releases the rest; over-capture allowed within tolerance — restaurants (MCC 5812-5814) +20%, fuel (5541/5542) up to $175; otherwise 0%. Expired auths can't be captured and their hold stops counting.
+- **Cashback**: capturing a purchase credits 1% of the captured amount (`cards.cashbackBps`, half-up) to the **card's own account** (`cashback_expense` → `customer_deposits`), even for family cards funded elsewhere. A merchant refund reverses cashback in proportion to the refunded amount, never more than remains earned − reversed (a full refund reverses it in full).
 - Foreign transaction fee 3% (recomputed on capture; not refunded on merchant refund). Out-of-network ATM $2.50.
 - Merchant refunds post once per network refund id and never exceed captured − refunded.
 
@@ -96,6 +99,10 @@ One live checking + one savings pocket per user, opened on KYC approval. Fake ro
 
 - Spouse: active immediately, spends from owner's checking within per-txn/daily/monthly limits (per-txn ≤ daily ≤ monthly).
 - Teen: `pending_guardian_approval` until the owner approves; spends **only from an allowance pocket** (`family_allowance` ledger account) funded by owner top-ups; default MCC blocks gambling/alcohol/tobacco/adult. Max 5 members.
+
+### Households (`household.ts`)
+
+An owner may create one household and invite members by email (`POST /household/members`); the invited Harbor user accepts (`accept`). The household carries an optional **overall monthly card-spend cap** enforced across every member and every card in the household (owner + active members): a card authorization is declined with `household_cap` when it would push the household's UTC-month card spend over the cap (inclusive boundary). Max `household.maxMembers` members.
 
 ### Disputes (`disputes.ts`, Reg E style)
 
@@ -108,7 +115,7 @@ Fee schedule table = published fee page. Savings APY 4.00%: daily accrual = floo
 
 ### Closure (`closure.ts`)
 
-Blocked by: pending holds (incl. teen allowance holds), negative balance, open disputes, `frozen_legal` (payout blocked), positive balance with no active name-matched linked bank. Otherwise: cancel all cards, pay out all pockets + allowance pockets in one ledger txn, close accounts, remove family members.
+Blocked by: pending holds (incl. teen allowance holds), negative balance, open disputes, `frozen_legal` (payout blocked), positive balance with no active name-matched linked bank. Otherwise: cancel all cards, pay out every open pocket (checking, savings, extra pockets and envelopes) + allowance pockets in one ledger txn, close accounts, remove family members.
 
 ### Statements (`statements.ts`)
 
@@ -116,7 +123,7 @@ Monthly statement = ledger lines for the account: opening + credits − debits =
 
 ## Ledger accounts
 
-`customer_deposits` (party = account), `family_allowance` (party = member), `ach_clearing`, `card_settlement`, `fee_revenue`, `interest_expense`, `dispute_receivable`, `dispute_loss`, `ach_return_loss`, `closure_payout`.
+`customer_deposits` (party = account), `family_allowance` (party = member), `ach_clearing`, `card_settlement`, `zelle_clearing`, `fee_revenue`, `cashback_expense`, `interest_expense`, `dispute_receivable`, `dispute_loss`, `ach_return_loss`, `closure_payout`.
 
 ## Supabase
 

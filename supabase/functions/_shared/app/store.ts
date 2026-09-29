@@ -42,6 +42,7 @@ export type MoneyOpCode =
   | "dispute_exceeds_amount"
   | "already_closed"
   | "closure_state_changed"
+  | "return_exceeds_amount"
   | "daily_limit"
   | "monthly_limit"
   | "unbalanced_ledger"
@@ -97,8 +98,48 @@ export interface MoneyOps {
     limit: LimitWindow | null;
     at: string;
   }): Promise<{ replayed: boolean }>;
-  /** Checking <-> savings. */
+  /** Instant move between any two of the user's own accounts (checking / savings / envelope). */
   pocketMove(p: { transfer: Row; ledger: LedgerPost; at: string }): Promise<{ replayed: boolean }>;
+  /**
+   * Zelle send: debit the source account and, for any shortfall, the user's other accounts named in
+   * the ledger, crediting `zelle_clearing` the full amount; record the transfer; re-check the
+   * transfer-out limit. Replaying the same transfer id posts nothing.
+   */
+  zelleSend(p: {
+    transfer: Row;
+    ledger: LedgerPost;
+    limit: LimitWindow | null;
+    at: string;
+  }): Promise<{ replayed: boolean }>;
+  /**
+   * Zelle return/refund from a webhook: credit the amount back to the source account, once per
+   * provider return id, never above what was sent minus what already came back. When the whole
+   * payment has been returned the transfer is marked returned.
+   */
+  zelleReturn(p: {
+    returnId: string;
+    transferId: string;
+    destinationAccountId: string;
+    amountCents: number;
+    returnCode: string;
+    ledger: LedgerPost;
+    at: string;
+    actorId: string | null;
+  }): Promise<{ duplicate: boolean; returnedCents: number; fullyReturned: boolean }>;
+  /**
+   * Auto-close a temporary envelope account past its end date: sweep its remaining balance into the
+   * primary checking account (one ledger txn + a transfer record) and close it. Aborts if the
+   * envelope balance changed since planning or it has an active hold.
+   */
+  envelopeSweepClose(p: {
+    envelopeAccountId: string;
+    checkingAccountId: string;
+    userId: string;
+    expectedPostedCents: number;
+    ledger: LedgerPost | null;
+    transfer: Row | null;
+    at: string;
+  }): Promise<{ sweptCents: number }>;
   /** Owner checking -> teen allowance pocket. */
   allowanceTopUp(p: {
     transfer: Row;
@@ -318,7 +359,7 @@ export class MemoryStore implements Store {
     if (!limit) return;
     const kinds =
       limit.kind === "transfer_out"
-        ? ["ach_out", "p2p"]
+        ? ["ach_out", "p2p", "zelle"]
         : limit.kind === "ach_in"
           ? ["ach_in"]
           : fail("payload_mismatch", `unknown limit kind ${limit.kind}`);
@@ -588,6 +629,150 @@ export class MemoryStore implements Store {
       )
         fail("payload_mismatch", "allowance pocket must be credited the amount");
       return this.transferOut("allowance_topup", p.transfer, p.ledger, null, p.at);
+    });
+  }
+
+  /** Distinct customer_deposits parties debited by a ledger payload, with each party's net debit. */
+  private customerDebits(t: LedgerPost): Map<string, number> {
+    const m = new Map<string, number>();
+    for (const l of t.lines) {
+      if (l.account !== "customer_deposits" || !l.party) continue;
+      m.set(l.party, (m.get(l.party) ?? 0) + l.debit - l.credit);
+    }
+    return m;
+  }
+
+  zelleSend(p: { transfer: Row; ledger: LedgerPost; limit: LimitWindow | null; at: string }) {
+    return this.tx(() => {
+      const t = p.transfer;
+      if (t.kind !== "zelle") fail("payload_mismatch", "not a Zelle transfer");
+      if (this.row("transfers", { id: t.id })) return { replayed: true };
+      const amount = Number(t.amount_cents);
+      const debits = this.customerDebits(p.ledger);
+      let total = 0;
+      for (const [, d] of debits) {
+        if (d <= 0)
+          fail("payload_mismatch", "each Zelle source account must be debited a positive amount");
+        total += d;
+      }
+      if (total !== amount || netDebit(p.ledger, "zelle_clearing", null) !== -amount)
+        fail("payload_mismatch", "Zelle debits must total the amount credited to zelle_clearing");
+      this.checkLimit(t.user_id, p.limit, amount, p.at);
+      // Sorted account order mirrors the SQL lock order (deadlock-free).
+      for (const acct of [...debits.keys()].sort()) {
+        const a = this.row("accounts", { id: acct });
+        if (!a) fail("not_found", "source account not found");
+        if (a!.user_id !== t.user_id)
+          fail("payload_mismatch", "a Zelle source account is not the sender's");
+        if (a!.status !== "open") fail("invalid_state", "a Zelle source account is not open");
+        const avail = this.available(acct, p.at);
+        if (debits.get(acct)! > avail)
+          fail("insufficient_funds", `available ${avail} in ${acct}, needed ${debits.get(acct)}`);
+      }
+      this.put("transfers", { fee_cents: 0, new_payee: false, created_at: p.at, ...t });
+      this.post(p.ledger, p.at);
+      return { replayed: false };
+    });
+  }
+
+  zelleReturn(p: {
+    returnId: string;
+    transferId: string;
+    destinationAccountId: string;
+    amountCents: number;
+    returnCode: string;
+    ledger: LedgerPost;
+    at: string;
+    actorId: string | null;
+  }) {
+    return this.tx(() => {
+      const t = this.row("transfers", { id: p.transferId });
+      if (!t || t.kind !== "zelle") return fail("not_found", "Zelle payment not found");
+      const prev = this.row("zelle_returns", { id: p.returnId });
+      if (prev) {
+        if (prev.transfer_id !== p.transferId)
+          fail("payload_mismatch", "return id already used for another payment");
+        const returnedCents = this.t("zelle_returns")
+          .filter((r) => r.transfer_id === p.transferId)
+          .reduce((s, r) => s + Number(r.amount_cents), 0);
+        return { duplicate: true, returnedCents, fullyReturned: t.status === "returned" };
+      }
+      if (p.amountCents <= 0) fail("payload_mismatch", "return amount must be positive");
+      const already = this.t("zelle_returns")
+        .filter((r) => r.transfer_id === p.transferId)
+        .reduce((s, r) => s + Number(r.amount_cents), 0);
+      if (already + p.amountCents > Number(t.amount_cents))
+        fail("return_exceeds_amount", "return exceeds the amount sent");
+      if (netDebit(p.ledger, "customer_deposits", p.destinationAccountId) !== -p.amountCents)
+        fail("payload_mismatch", "a Zelle return credits the source account the return amount");
+      this.put("zelle_returns", {
+        id: p.returnId,
+        transfer_id: p.transferId,
+        amount_cents: p.amountCents,
+        return_code: p.returnCode,
+        created_at: p.at,
+      });
+      this.post(p.ledger, p.at);
+      const returnedCents = already + p.amountCents;
+      const fullyReturned = returnedCents === Number(t.amount_cents);
+      if (fullyReturned) Object.assign(t, { status: "returned", return_code: p.returnCode });
+      this.put("audit_log", {
+        actor_id: p.actorId,
+        action: "zelle_return",
+        entity: "transfer",
+        entity_id: p.transferId,
+        reason: p.returnCode,
+        data: { amountCents: p.amountCents },
+        created_at: p.at,
+      });
+      return { duplicate: false, returnedCents, fullyReturned };
+    });
+  }
+
+  envelopeSweepClose(p: {
+    envelopeAccountId: string;
+    checkingAccountId: string;
+    userId: string;
+    expectedPostedCents: number;
+    ledger: LedgerPost | null;
+    transfer: Row | null;
+    at: string;
+  }) {
+    return this.tx(() => {
+      const env = this.row("accounts", { id: p.envelopeAccountId });
+      if (!env) return fail("not_found", "envelope account not found");
+      if (env!.user_id !== p.userId)
+        fail("payload_mismatch", "envelope belongs to another customer");
+      if (env!.kind !== "envelope") fail("invalid_state", "not an envelope account");
+      if (env!.status === "closed") fail("already_closed", "envelope already closed");
+      const chk = this.row("accounts", { id: p.checkingAccountId });
+      if (!chk || chk!.user_id !== p.userId || chk!.kind !== "checking" || chk!.status === "closed")
+        fail("not_found", "primary checking account not found");
+      if (this.activeHolds((h) => h.account_id === p.envelopeAccountId, p.at) > 0)
+        fail("closure_state_changed", "envelope has an active hold");
+      if (this.posted("customer_deposits", p.envelopeAccountId) !== p.expectedPostedCents)
+        fail("closure_state_changed", "envelope balance changed while sweeping");
+      if (p.ledger) {
+        if (
+          netDebit(p.ledger, "customer_deposits", p.envelopeAccountId) !== p.expectedPostedCents ||
+          netDebit(p.ledger, "customer_deposits", p.checkingAccountId) !== -p.expectedPostedCents
+        )
+          fail("payload_mismatch", "sweep must move the envelope balance into checking");
+        this.post(p.ledger, p.at);
+        if (p.transfer)
+          this.put("transfers", {
+            fee_cents: 0,
+            new_payee: false,
+            created_at: p.at,
+            ...p.transfer,
+          });
+      } else if (p.expectedPostedCents !== 0) {
+        fail("payload_mismatch", "a non-zero sweep needs a ledger txn");
+      }
+      if (this.posted("customer_deposits", p.envelopeAccountId) !== 0)
+        fail("payload_mismatch", "sweep must leave the envelope at zero");
+      this.patch("accounts", { id: p.envelopeAccountId }, { status: "closed", closed_at: p.at });
+      return { sweptCents: p.expectedPostedCents };
     });
   }
 
@@ -1103,6 +1288,59 @@ export class SupabaseStore implements Store {
   }
   allowanceTopUp(p: { transfer: Row; ledger: LedgerPost; at: string }) {
     return this.transferOut("harbor_allowance_topup", p);
+  }
+  zelleSend(p: { transfer: Row; ledger: LedgerPost; limit: LimitWindow | null; at: string }) {
+    return this.transferOut("harbor_zelle_send", p, { p_limit: SupabaseStore.limitArg(p.limit) });
+  }
+  async zelleReturn(p: {
+    returnId: string;
+    transferId: string;
+    destinationAccountId: string;
+    amountCents: number;
+    returnCode: string;
+    ledger: LedgerPost;
+    at: string;
+    actorId: string | null;
+  }) {
+    const r = await this.rpc<{
+      duplicate: boolean;
+      returned_cents: number;
+      fully_returned: boolean;
+    }>("harbor_zelle_return", {
+      p_return_id: p.returnId,
+      p_transfer_id: p.transferId,
+      p_destination_account_id: p.destinationAccountId,
+      p_amount_cents: p.amountCents,
+      p_return_code: p.returnCode,
+      p_ledger: SupabaseStore.ledgerArg(p.ledger),
+      p_at: p.at,
+      p_actor: p.actorId,
+    });
+    return {
+      duplicate: !!r.duplicate,
+      returnedCents: Number(r.returned_cents),
+      fullyReturned: !!r.fully_returned,
+    };
+  }
+  async envelopeSweepClose(p: {
+    envelopeAccountId: string;
+    checkingAccountId: string;
+    userId: string;
+    expectedPostedCents: number;
+    ledger: LedgerPost | null;
+    transfer: Row | null;
+    at: string;
+  }) {
+    const r = await this.rpc<{ swept_cents: number }>("harbor_envelope_sweep_close", {
+      p_envelope_account_id: p.envelopeAccountId,
+      p_checking_account_id: p.checkingAccountId,
+      p_user_id: p.userId,
+      p_expected_posted_cents: p.expectedPostedCents,
+      p_ledger: SupabaseStore.ledgerArg(p.ledger),
+      p_transfer: p.transfer,
+      p_at: p.at,
+    });
+    return { sweptCents: Number(r.swept_cents) };
   }
   async cardAuthorize(p: { auth: Row; hold: Row | null; at: string }) {
     const r = await this.rpc<{

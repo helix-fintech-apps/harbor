@@ -135,7 +135,10 @@ describe.each(harnesses().map((h) => [h.name, h] as const))("%s store", (_name, 
       expect(codes(rs)).toEqual(["capture_rejected", "ok"]);
       const auth = (await me()).authorizations.find((x: any) => x.id === a.authorizationId);
       expect(auth.status).toBe("captured");
-      expect((await pocket()).postedCents).toBe(250_000 - Number(auth.captured_cents));
+      // whichever capture won, the balance is the spend plus its 1% cashback.
+      expect((await pocket()).postedCents).toBe(
+        250_000 - Number(auth.captured_cents) + Number(auth.cashback_cents ?? 0),
+      );
       expect((await pocket()).holdsCents).toBe(0);
     });
 
@@ -160,7 +163,8 @@ describe.each(harnesses().map((h) => [h.name, h] as const))("%s store", (_name, 
       const rs = await Promise.all([refund("re_a"), refund("re_b")]);
       done();
       expect(codes(rs)).toEqual(["ok", "refund_rejected"]);
-      expect((await pocket()).postedCents).toBe(250_000 - 5_000 + 3_000);
+      // capture $50 earns 50c cashback; the winning $30 refund reverses 30c of it.
+      expect((await pocket()).postedCents).toBe(250_000 - 5_000 + 50 + 3_000 - 30);
       expect(await trialBalance()).toBe(0);
     });
   });
@@ -317,13 +321,14 @@ describe.each(harnesses().map((h) => [h.name, h] as const))("%s store", (_name, 
         }),
         "invalid_state",
       );
-      expect((await pocket()).postedCents).toBe(250_000);
+      // $3,000 capture earned $0.30 cashback, so the provisional-credited balance is 250_030.
+      expect((await pocket()).postedCents).toBe(250_030);
       expect(
         body(
           await app.call(as(ADMIN), "POST", `/admin/disputes/${d.id}/resolve`, { outcome: "won" }),
         ).status,
       ).toBe("won");
-      expect((await pocket()).postedCents).toBe(250_000);
+      expect((await pocket()).postedCents).toBe(250_030);
       expect(await trialBalance()).toBe(0);
     });
   });
