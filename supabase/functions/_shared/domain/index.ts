@@ -9,6 +9,8 @@ export * from "./achIn.ts";
 export * from "./transfers.ts";
 export * from "./cards.ts";
 export * from "./family.ts";
+export * from "./households.ts";
+export * from "./zelle.ts";
 export * from "./disputes.ts";
 export * from "./interest.ts";
 export * from "./closure.ts";

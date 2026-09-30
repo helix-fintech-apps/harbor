@@ -115,6 +115,34 @@ Deno.serve(async (req) => {
     return json(200, { received: true });
   }
 
+  // Zelle return/refund webhooks (money the network sends back; each event processed once).
+  if (path === "/webhooks/zelle" && req.method === "POST") {
+    const raw = await req.text();
+    if (
+      !(await verifyStripeSignature(
+        raw,
+        req.headers.get("zelle-signature"),
+        env.ZELLE_WEBHOOK_SECRET,
+      ))
+    )
+      return json(400, { error: { code: "bad_signature" } });
+    const evt = JSON.parse(raw);
+    const { error: dup } = await admin
+      .from("provider_events")
+      .insert({ id: evt.id, provider: "zelle", type: evt.type });
+    if (dup) return json(200, { received: true, duplicate: true });
+    if (evt.type === "payment.returned" || evt.type === "payment.refunded") {
+      const ref = evt.data?.payment_ref ?? evt.data?.provider_ref;
+      try {
+        if (ref) await service.zelleReturnByRef(String(ref), evt.data?.reason ?? null);
+      } catch (e) {
+        const err = e instanceof ApiError ? e : new ApiError(500, "internal", (e as Error).message);
+        return json(err.status, { error: { code: err.code, message: err.message } });
+      }
+    }
+    return json(200, { received: true });
+  }
+
   let caller = null;
   const token = req.headers.get("authorization")?.replace(/^Bearer /i, "");
   if (token) {

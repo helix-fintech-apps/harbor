@@ -66,6 +66,12 @@ add("POST", "/transfers/ach-in", (s, c, _p, b) => s.achIn(c, b));
 add("POST", "/transfers/ach-out", (s, c, _p, b) => s.achOut(c, b));
 add("POST", "/transfers/p2p", (s, c, _p, b) => s.p2p(c, b));
 add("POST", "/transfers/pocket", (s, c, _p, b) => s.pocketMove(c, b));
+add("POST", "/transfers/internal", (s, c, _p, b) => s.internalTransfer(c, b));
+add("POST", "/accounts", (s, c, _p, b) => s.openAccount(c, b));
+add("POST", "/households", (s, c, _p, b) => s.createHousehold(c, b));
+add("POST", "/households/:id/invite", (s, c, p, b) => s.inviteToHousehold(c, p.id, b));
+add("POST", "/households/invites/:id/accept", (s, c, p) => s.acceptHouseholdInvite(c, p.id));
+add("POST", "/zelle/payments", (s, c, _p, b) => s.zellePay(c, b));
 add("POST", "/cards", (s, c, _p, b) => s.issueCard(c, b));
 add("POST", "/cards/:id/freeze", (s, c, p) => s.setCardStatus(c, p.id, "frozen"));
 add("POST", "/cards/:id/unfreeze", (s, c, p) => s.setCardStatus(c, p.id, "active"));
@@ -110,7 +116,12 @@ add("POST", "/admin/disputes/:id/provisional-credit", (s, c, p) => s.provisional
 add("POST", "/admin/disputes/:id/resolve", (s, c, p, b) => s.resolveDispute(c, p.id, b?.outcome));
 add("GET", "/admin/ledger", (s, c, _p, _b, q) => s.adminLedger(c, q.limit ? Number(q.limit) : 200));
 add("GET", "/admin/audit", (s, c) => s.adminAudit(c));
+add("POST", "/admin/transfers/:id/zelle-return", (s, c, p, b) =>
+  s.zelleReturn(c, p.id, b?.reason ?? null),
+);
 add("POST", "/admin/jobs/settle-ach", (s, c) => s.settleAch(c));
+add("POST", "/admin/jobs/close-envelopes", (s, c) => s.closeEnvelopes(c));
+add("POST", "/admin/jobs/run-zelle", (s, c) => s.runZelle(c));
 add("POST", "/admin/jobs/expire-auths", (s, c) => s.expireAuths(c));
 add("POST", "/admin/jobs/dispute-deadlines", (s, c) => s.disputeDeadlines(c));
 add("POST", "/admin/jobs/accrue-interest", (s, c, _p, b) => s.accrueInterest(c, b?.day));

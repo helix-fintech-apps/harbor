@@ -5,11 +5,12 @@ import type { FeeSchedule, MoneyPolicy, Tier } from "./config.ts";
 import { mccGroup } from "./config.ts";
 import type { KycState } from "./kyc.ts";
 import { canMoveMoney } from "./kyc.ts";
-import { checkLimit, type UsageEvent } from "./limits.ts";
-import { applyBps } from "./money.ts";
+import { checkLimit, usage, type UsageEvent } from "./limits.ts";
+import { applyBps, divRoundHalfUp } from "./money.ts";
 import { addDays } from "./time.ts";
 import { cr, dr, txn, type LedgerAccount, type Txn } from "./ledger.ts";
-import { checkFamilySpend, type FamilyMember } from "./family.ts";
+import { checkFamilySpend, type FamilyMember, type SpendLimits } from "./family.ts";
+import { householdMonthSpend, withinHouseholdCap } from "./households.ts";
 
 export type CardKind = "virtual" | "physical";
 export type CardStatus = "requested" | "active" | "frozen" | "canceled" | "replaced";
@@ -85,7 +86,11 @@ export type DeclineReason =
   | "per_txn_limit"
   | "member_daily_limit"
   | "member_monthly_limit"
-  | "allowance_exceeded";
+  | "allowance_exceeded"
+  | "card_per_txn_limit"
+  | "card_daily_limit"
+  | "card_monthly_limit"
+  | "household_monthly_cap";
 
 export interface AuthRequest {
   amountCents: number;
@@ -101,11 +106,15 @@ export interface AuthContext {
   ownerKyc: KycState;
   ownerTier: Tier;
   ownerUsage: UsageEvent[]; // card_spend events on the owner's account (all cards)
-  availableCents: number; // owner's checking available balance
+  availableCents: number; // the card's funding-account available balance
   recentAuthAttempts: Date[]; // this card
   member?: FamilyMember;
   memberSpend?: UsageEvent[]; // card_spend events for this family member
   allowanceAvailableCents?: number; // teen allowance pocket
+  cardLimits?: SpendLimits; // per-card per-txn / daily / monthly limits (any card, optional)
+  cardSpend?: UsageEvent[]; // card_spend events for THIS card (for its own daily / monthly limits)
+  householdCapCents?: number | null; // household-wide monthly card-spend cap, if the owner is in one
+  householdSpend?: UsageEvent[]; // card_spend across every card of every household member
   now: Date;
 }
 
@@ -149,6 +158,14 @@ export function authorize(
   if (!canMoveMoney(ctx.ownerKyc)) return no("kyc_not_approved");
   if (velocityExceeded(ctx.recentAuthAttempts, ctx.now, policy)) return no("velocity");
 
+  // Per-card limits (optional, on any card): the purchase amount is measured, matching tier limits.
+  if (ctx.cardLimits) {
+    if (req.amountCents > ctx.cardLimits.perTxnCents) return no("card_per_txn_limit");
+    const cu = usage(ctx.cardSpend ?? [], "card_spend", ctx.now);
+    if (cu.today + req.amountCents > ctx.cardLimits.dailyCents) return no("card_daily_limit");
+    if (cu.month + req.amountCents > ctx.cardLimits.monthlyCents) return no("card_monthly_limit");
+  }
+
   const feeCents = cardFees(req, fees);
   const need = req.amountCents + feeCents;
 
@@ -175,6 +192,15 @@ export function authorize(
     policy,
   );
   if (!lim.ok) return no(lim.reason!);
+  // Household-wide monthly cap across every member and card, on top of tier and per-card limits.
+  if (
+    !withinHouseholdCap(
+      ctx.householdCapCents,
+      householdMonthSpend(ctx.householdSpend ?? [], ctx.now),
+      req.amountCents,
+    )
+  )
+    return no("household_monthly_cap");
   if (funding.account === "customer_deposits" && need > ctx.availableCents)
     return no("insufficient_funds");
 
@@ -292,6 +318,59 @@ export function planMerchantRefund(p: {
       p.refundId,
     ),
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Cashback. 1% of the captured purchase amount (not fees) is credited to the card's own account
+// on capture, and reversed pro-rata on merchant refund. Cashback is posted as its OWN ledger txn
+// (dr cashback_expense, cr customer_deposits[card account]) so it never collides with the capture
+// txn's guard when the funding pocket IS the card's account.
+// ---------------------------------------------------------------------------------------------
+
+/** Cashback earned on a capture: rateBps of the captured amount, rounded half-up. */
+export function cashbackForCapture(capturedCents: number, policy: MoneyPolicy): number {
+  if (capturedCents <= 0) return 0;
+  return applyBps(capturedCents, policy.cashback.rateBps);
+}
+
+/**
+ * The cashback to claw back for a refund, computed incrementally against the running refunded
+ * total so that a full refund reverses exactly the cashback earned (no rounding residue):
+ *   reverse = round(cashback * (refundedSoFar + refund) / captured) - round(cashback * refundedSoFar / captured).
+ */
+export function cashbackReversal(p: {
+  cashbackCents: number;
+  capturedCents: number;
+  refundedSoFarCents: number;
+  refundAmountCents: number;
+}): number {
+  if (p.cashbackCents <= 0 || p.capturedCents <= 0 || p.refundAmountCents <= 0) return 0;
+  const after = divRoundHalfUp(
+    p.cashbackCents * (p.refundedSoFarCents + p.refundAmountCents),
+    p.capturedCents,
+  );
+  const before = divRoundHalfUp(p.cashbackCents * p.refundedSoFarCents, p.capturedCents);
+  return Math.max(0, after - before);
+}
+
+export function cashbackLedger(authId: string, cardAccountId: string, cashbackCents: number): Txn {
+  return txn(
+    "card_cashback",
+    [dr("cashback_expense", cashbackCents), cr("customer_deposits", cashbackCents, cardAccountId)],
+    authId,
+  );
+}
+
+export function cashbackReversalLedger(
+  refundId: string,
+  cardAccountId: string,
+  reversalCents: number,
+): Txn {
+  return txn(
+    "card_cashback_reversal",
+    [dr("customer_deposits", reversalCents, cardAccountId), cr("cashback_expense", reversalCents)],
+    refundId,
+  );
 }
 
 export function fakeLast4(seed: string): string {

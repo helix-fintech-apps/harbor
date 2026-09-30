@@ -71,6 +71,25 @@ import {
   addBusinessDays,
   checkLimit,
   limitWindow,
+  type AccountKind,
+  validateEnvelopeDates,
+  envelopeReachedEnd,
+  planEnvelopeSweep,
+  validateHouseholdName,
+  validateMonthlyCap,
+  planZelleSend,
+  planZelleReturn,
+  nextZelleRun,
+  validateRecipient,
+  isValidFrequency,
+  ZelleError,
+  type ZelleFrequency,
+  type ZelleRecipient,
+  type SpendablePocket,
+  cashbackForCapture,
+  cashbackReversal,
+  cashbackLedger,
+  cashbackReversalLedger,
 } from "../domain/index.ts";
 import type { Providers } from "../providers/index.ts";
 import { MoneyOpError, uuid, type Row, type Store } from "./store.ts";
@@ -191,10 +210,80 @@ export class HarborService {
     );
   }
 
-  async pocket(userId: string, kind: "checking" | "savings"): Promise<Row> {
-    const a = (await this.pockets(userId)).find((x) => x.kind === kind);
+  /** The user's default pocket of a kind. For checking this is the primary pocket (cards, ACH,
+   *  allowances and Zelle default to it); other kinds return the oldest open pocket. */
+  async pocket(userId: string, kind: AccountKind): Promise<Row> {
+    const of = (await this.pockets(userId)).filter((x) => x.kind === kind);
+    const a = kind === "checking" ? (of.find((x) => x.is_primary) ?? of[0]) : of[0];
     if (!a) throw new ApiError(409, "no_account", `no open ${kind} account (complete KYC first)`);
     return a;
+  }
+
+  /** The user's primary checking row (for envelope sweeps / closure payout), or null if none open. */
+  async primaryCheckingRow(userId: string): Promise<Row | null> {
+    const checking = (await this.pockets(userId)).filter((x) => x.kind === "checking");
+    return checking.find((x) => x.is_primary) ?? checking[0] ?? null;
+  }
+
+  /** A pocket owned by the caller, still open. Used by on-demand transfers, cards and Zelle sends. */
+  async accountOf(userId: string, accountId: string): Promise<Row> {
+    const a = await this.store.one("accounts", { id: accountId, user_id: userId });
+    if (!a || a.status === "closed") throw new ApiError(404, "not_found", "account not found");
+    return a;
+  }
+
+  /** Pockets a Zelle send may draw from: the source first, then the user's other open checking and
+   *  savings pockets (never earmarked envelopes) ordered checking→savings then oldest first. */
+  async spendableForZelle(userId: string, source: Row): Promise<SpendablePocket[]> {
+    const open = (await this.pockets(userId)).filter((a) => a.status === "open");
+    const others = open
+      .filter((a) => a.id !== source.id && (a.kind === "checking" || a.kind === "savings"))
+      .sort((x, y) =>
+        x.kind === y.kind
+          ? String(x.opened_at).localeCompare(String(y.opened_at))
+          : x.kind === "checking"
+            ? -1
+            : 1,
+      );
+    const out: SpendablePocket[] = [];
+    for (const a of [source, ...others])
+      out.push({
+        accountId: a.id,
+        kind: a.kind,
+        availableCents: (await this.balanceOf(a.id)).availableCents,
+      });
+    return out;
+  }
+
+  /** The active household this user belongs to (as owner or member), or null. */
+  async householdOf(userId: string): Promise<Row | null> {
+    const m = (await this.store.list("household_members", { user_id: userId })).find(
+      (x) => x.status === "active",
+    );
+    if (!m) return null;
+    return (await this.store.one("households", { id: m.household_id })) ?? null;
+  }
+
+  /** Card-spend usage across every card of every active member of a household (for the monthly cap). */
+  async householdCardSpend(householdId: string): Promise<UsageEvent[]> {
+    const members = (await this.store.list("household_members", { household_id: householdId }))
+      .filter((m) => m.status === "active" && m.user_id)
+      .map((m) => m.user_id);
+    const events: UsageEvent[] = [];
+    for (const uid of members)
+      for (const e of await this.usage(uid)) if (e.kind === "card_spend") events.push(e);
+    return events;
+  }
+
+  /** Card-spend usage for one card (for its own per-card daily / monthly limits). */
+  async cardSpendEvents(cardId: string): Promise<UsageEvent[]> {
+    return (await this.store.list("card_authorizations", { card_id: cardId }))
+      .filter((a) => a.status === "authorized" || a.status === "captured")
+      .map((a) => ({
+        at: new Date(a.created_at),
+        amountCents: Number(a.status === "captured" ? a.captured_cents : a.amount_cents),
+        kind: "card_spend" as const,
+      }));
   }
 
   async holds(): Promise<Hold[]> {
@@ -241,7 +330,10 @@ export class HarborService {
     const ev: UsageEvent[] = [];
     for (const t of await this.store.list("transfers", { user_id: userId })) {
       if (t.status === "failed") continue;
-      if (t.kind === "ach_out" || t.kind === "p2p")
+      if (
+        (t.kind === "ach_out" || t.kind === "p2p" || t.kind === "zelle") &&
+        t.status !== "returned"
+      )
         ev.push({
           at: new Date(t.created_at),
           amountCents: Number(t.amount_cents),
@@ -416,6 +508,9 @@ export class HarborService {
         account_number: fakeAccountNumber(id),
         routing_number: HARBOR_ROUTING_NUMBER,
         nickname: kind === "checking" ? "Everyday" : "Savings",
+        is_primary: kind === "checking",
+        start_date: null,
+        end_date: null,
         policy_version: this.policy.version,
         opened_at: this.now().toISOString(),
         closed_at: null,
@@ -529,6 +624,9 @@ export class HarborService {
         nickname: a.nickname,
         accountNumber: a.account_number,
         routingNumber: a.routing_number,
+        isPrimary: !!a.is_primary,
+        startDate: a.start_date ?? null,
+        endDate: a.end_date ?? null,
         ...(await this.balanceOf(a.id)),
       });
     }
@@ -572,6 +670,36 @@ export class HarborService {
       .slice(0, 50);
     const disputes = await this.store.list("disputes", { user_id: c.userId });
     const u = await this.usage(c.userId);
+    const householdRow = await this.householdOf(c.userId);
+    let household = null;
+    if (householdRow) {
+      const members = (
+        await this.store.list("household_members", { household_id: householdRow.id })
+      ).filter((m) => m.status !== "removed");
+      household = {
+        id: householdRow.id,
+        name: householdRow.name,
+        ownerUserId: householdRow.owner_user_id,
+        monthlyCapCents: householdRow.monthly_cap_cents ?? null,
+        monthSpendCents:
+          householdRow.monthly_cap_cents != null
+            ? (await this.householdCardSpend(householdRow.id)).reduce(
+                (s, e) => s + e.amountCents,
+                0,
+              )
+            : null,
+        members: members.map((m) => ({
+          id: m.id,
+          userId: m.user_id ?? null,
+          invitedEmail: m.invited_email ?? null,
+          role: m.role,
+          status: m.status,
+        })),
+      };
+    }
+    const zelleSchedules = (await this.store.list("zelle_schedules", { user_id: c.userId })).filter(
+      (s) => s.status === "active",
+    );
     return {
       profile: {
         id: p.id,
@@ -587,9 +715,11 @@ export class HarborService {
       banks,
       cards,
       family,
+      household,
       transfers,
       authorizations,
       disputes,
+      zelleSchedules,
       now: this.now().toISOString(),
     };
   }
@@ -1043,11 +1173,265 @@ export class HarborService {
     return { id, status: "completed" };
   }
 
-  // ---------- cards ----------
-  async issueCard(c: Caller, body: { kind: "virtual" | "physical"; familyMemberId?: string }) {
+  // ---------- on-demand accounts ----------
+  /** Open an extra pocket on demand: another checking/savings, or a temporary envelope that runs
+   *  from startDate to endDate and auto-closes into primary checking on its end date. */
+  async openAccount(
+    c: Caller,
+    body: { kind: AccountKind; nickname?: string; startDate?: string; endDate?: string },
+  ) {
     const p = await this.profile(c.userId);
-    const chk = await this.pocket(c.userId, "checking");
-    const existing = (await this.store.list("cards", { account_id: chk.id })).map((r) =>
+    if (!canMoveMoney(p.kyc_state))
+      throw new ApiError(403, "kyc_not_approved", "complete verification first");
+    const kind = body.kind;
+    if (kind !== "checking" && kind !== "savings" && kind !== "envelope")
+      throw new ApiError(422, "invalid_kind", "kind must be checking, savings or envelope");
+    let start: string | null = null;
+    let end: string | null = null;
+    if (kind === "envelope") {
+      start = body.startDate ?? isoDate(this.now());
+      if (!body.endDate)
+        throw new ApiError(422, "invalid_envelope", "envelope requires an endDate");
+      end = body.endDate;
+      const errs = validateEnvelopeDates(start, end);
+      if (errs.length) throw new ApiError(422, "invalid_envelope", errs.join("; "));
+    }
+    const id = uuid();
+    const row = await this.store.insert("accounts", {
+      id,
+      user_id: c.userId,
+      kind,
+      status: "open",
+      account_number: fakeAccountNumber(id),
+      routing_number: HARBOR_ROUTING_NUMBER,
+      nickname:
+        body.nickname?.trim() ||
+        (kind === "checking" ? "Checking" : kind === "savings" ? "Savings" : "Envelope"),
+      is_primary: false,
+      start_date: start,
+      end_date: end,
+      policy_version: this.policy.version,
+      opened_at: this.now().toISOString(),
+      closed_at: null,
+    });
+    await this.audit(c.userId, "account_opened", "account", id, undefined, { kind, start, end });
+    return {
+      id: row.id,
+      kind,
+      status: "open",
+      nickname: row.nickname,
+      startDate: start,
+      endDate: end,
+      accountNumber: row.account_number,
+      routingNumber: row.routing_number,
+    };
+  }
+
+  /** Instant internal transfer between any two of the user's own pockets. */
+  async internalTransfer(
+    c: Caller,
+    body: {
+      fromAccountId: string;
+      toAccountId: string;
+      amountCents: number;
+      idempotencyKey?: string;
+    },
+  ) {
+    const p = await this.profile(c.userId);
+    const from = await this.accountOf(c.userId, body.fromAccountId);
+    const to = await this.accountOf(c.userId, body.toAccountId);
+    if (from.status !== "open" || to.status !== "open") throw new ApiError(409, "account_frozen");
+    const id = uuid();
+    let t;
+    try {
+      t = planPocketMove({
+        transferId: id,
+        fromAccountId: from.id,
+        toAccountId: to.id,
+        amountCents: body.amountCents,
+        availableCents: (await this.balanceOf(from.id)).availableCents,
+        kyc: p.kyc_state,
+      });
+    } catch (e) {
+      this.mapTransferError(e);
+    }
+    const at = this.now().toISOString();
+    await this.store
+      .pocketMove({
+        transfer: {
+          id,
+          user_id: c.userId,
+          kind: "pocket",
+          speed: null,
+          from_account_id: from.id,
+          to_account_id: to.id,
+          linked_bank_id: null,
+          counterparty_user_id: null,
+          family_member_id: null,
+          amount_cents: body.amountCents,
+          fee_cents: 0,
+          status: "completed",
+          settle_at: null,
+          return_code: null,
+          new_payee: false,
+          policy_version: this.policy.version,
+          fee_version: this.fees.version,
+          idempotency_key: this.transferIdemKey(c, body.idempotencyKey),
+          created_at: at,
+          settled_at: null,
+        },
+        ledger: { ...t!, idem: `transfer:${id}` },
+        at,
+      })
+      .catch((e) => this.opFailed(e));
+    return {
+      id,
+      status: "completed",
+      fromAccountId: from.id,
+      toAccountId: to.id,
+      amountCents: body.amountCents,
+    };
+  }
+
+  /** Job: auto-close every envelope that has reached its end date, sweeping its balance to primary checking. */
+  async closeEnvelopes(c: Caller | null) {
+    if (c) this.requireStaff(c);
+    const now = this.now();
+    let closed = 0;
+    for (const env of await this.store.list("accounts", { kind: "envelope", status: "open" })) {
+      if (!envelopeReachedEnd(env.end_date, now)) continue;
+      const primary = await this.primaryCheckingRow(env.user_id);
+      if (!primary) continue; // no primary checking to sweep into
+      const remaining = (await this.balanceOf(env.id)).postedCents;
+      const sweep = planEnvelopeSweep({
+        envelopeId: env.id,
+        primaryCheckingId: primary.id,
+        remainingCents: remaining,
+      });
+      const r = await this.store
+        .closeEnvelope({
+          envelopeId: env.id,
+          primaryCheckingId: primary.id,
+          ledger: sweep ? { ...sweep, idem: `envelope_close:${env.id}` } : null,
+          at: now.toISOString(),
+        })
+        .catch((e) => this.opFailed(e));
+      if (r.closed) {
+        closed++;
+        await this.audit(c?.userId ?? null, "envelope_closed", "account", env.id, undefined, {
+          sweptCents: r.sweptCents,
+          to: primary.id,
+        });
+      }
+    }
+    return { closed };
+  }
+
+  // ---------- households ----------
+  async createHousehold(c: Caller, body: { name: string; monthlyCapCents?: number | null }) {
+    const p = await this.profile(c.userId);
+    if (!canMoveMoney(p.kyc_state)) throw new ApiError(403, "kyc_not_approved");
+    const errs = [
+      ...validateHouseholdName(body.name ?? ""),
+      ...validateMonthlyCap(body.monthlyCapCents),
+    ];
+    if (errs.length) throw new ApiError(422, "invalid_household", errs.join("; "));
+    if (await this.householdOf(c.userId))
+      throw new ApiError(409, "already_in_household", "you are already in a household");
+    const id = uuid();
+    const at = this.now().toISOString();
+    const row = await this.store.insert("households", {
+      id,
+      owner_user_id: c.userId,
+      name: body.name.trim(),
+      monthly_cap_cents: body.monthlyCapCents ?? null,
+      created_at: at,
+    });
+    await this.store.insert("household_members", {
+      id: uuid(),
+      household_id: id,
+      user_id: c.userId,
+      invited_email: p.email,
+      role: "owner",
+      status: "active",
+      invited_at: at,
+      joined_at: at,
+    });
+    await this.audit(c.userId, "household_created", "household", id);
+    return {
+      id: row.id,
+      name: row.name,
+      monthlyCapCents: row.monthly_cap_cents ?? null,
+    };
+  }
+
+  async inviteToHousehold(c: Caller, householdId: string, body: { email: string }) {
+    const h = await this.store.one("households", { id: householdId });
+    if (!h) throw new ApiError(404, "not_found", "household not found");
+    if (h.owner_user_id !== c.userId)
+      throw new ApiError(403, "forbidden", "only the household owner can invite members");
+    const email = String(body.email ?? "")
+      .trim()
+      .toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email))
+      throw new ApiError(422, "invalid_email", "a valid email is required");
+    const members = await this.store.list("household_members", { household_id: householdId });
+    if (members.some((m) => m.invited_email === email && m.status !== "removed"))
+      throw new ApiError(409, "already_invited", "that email is already in the household");
+    const invitee = await this.store.one("profiles", { email });
+    const id = uuid();
+    await this.store.insert("household_members", {
+      id,
+      household_id: householdId,
+      user_id: invitee?.id ?? null,
+      invited_email: email,
+      role: "member",
+      status: "invited",
+      invited_at: this.now().toISOString(),
+      joined_at: null,
+    });
+    await this.audit(c.userId, "household_invited", "household", householdId, email);
+    return { id, householdId, invitedEmail: email, status: "invited" };
+  }
+
+  async acceptHouseholdInvite(c: Caller, inviteId: string) {
+    const p = await this.profile(c.userId);
+    const invite = await this.store.one("household_members", { id: inviteId });
+    if (!invite || invite.status !== "invited")
+      throw new ApiError(404, "not_found", "invitation not found");
+    if (invite.invited_email !== String(p.email).toLowerCase())
+      throw new ApiError(403, "forbidden", "this invitation was sent to a different email");
+    if (await this.householdOf(c.userId))
+      throw new ApiError(409, "already_in_household", "you are already in a household");
+    await this.store.update(
+      "household_members",
+      { id: inviteId },
+      { user_id: c.userId, status: "active", joined_at: this.now().toISOString() },
+    );
+    await this.audit(c.userId, "household_joined", "household", invite.household_id);
+    return { id: inviteId, householdId: invite.household_id, status: "active" };
+  }
+
+  // ---------- cards ----------
+  async issueCard(
+    c: Caller,
+    body: {
+      kind: "virtual" | "physical";
+      familyMemberId?: string;
+      accountId?: string;
+      limits?: SpendLimits;
+    },
+  ) {
+    const p = await this.profile(c.userId);
+    // A card is tied to a specific funding account (default: primary checking). Envelopes are
+    // temporary and can't fund cards.
+    const acct = body.accountId
+      ? await this.accountOf(c.userId, body.accountId)
+      : await this.pocket(c.userId, "checking");
+    if (acct.kind === "envelope")
+      throw new ApiError(422, "invalid_funding_account", "cards cannot be funded by an envelope");
+    if (acct.status !== "open") throw new ApiError(409, "account_frozen");
+    const existing = (await this.store.list("cards", { account_id: acct.id })).map((r) =>
       this.toCard(r),
     );
     let holder = c.userId;
@@ -1070,6 +1454,10 @@ export class HarborService {
       const ok = canIssueCard(p.kyc_state, body.kind, existing, this.policy);
       if (!ok.ok) throw new ApiError(ok.reason === "kyc_not_approved" ? 403 : 409, ok.reason!);
     }
+    if (body.limits) {
+      const errs = validateLimits(body.limits);
+      if (errs.length) throw new ApiError(422, "invalid_limits", errs.join("; "));
+    }
     const id = uuid();
     const prov = await this.providers.issuer.createCard({
       userId: c.userId,
@@ -1079,7 +1467,7 @@ export class HarborService {
     });
     const row = await this.store.insert("cards", {
       id,
-      account_id: chk.id,
+      account_id: acct.id,
       holder_user_id: holder,
       family_member_id: body.familyMemberId ?? null,
       kind: body.kind,
@@ -1088,6 +1476,9 @@ export class HarborService {
       provider: this.providers.issuer.name,
       provider_card_id: prov.providerCardId,
       replaces_card_id: null,
+      per_txn_cents: body.limits?.perTxnCents ?? null,
+      daily_cents: body.limits?.dailyCents ?? null,
+      monthly_cents: body.limits?.monthlyCents ?? null,
       created_at: this.now().toISOString(),
       canceled_at: null,
     });
@@ -1167,6 +1558,16 @@ export class HarborService {
       (a) => new Date(a.created_at),
     );
     const now = this.now();
+    const cardLimits =
+      card.per_txn_cents != null
+        ? {
+            perTxnCents: Number(card.per_txn_cents),
+            dailyCents: Number(card.daily_cents),
+            monthlyCents: Number(card.monthly_cents),
+          }
+        : undefined;
+    const household = await this.householdOf(owner.id);
+    const householdCapCents = household?.monthly_cap_cents ?? null;
     const decision = authorize(
       {
         amountCents: req.amountCents,
@@ -1187,6 +1588,13 @@ export class HarborService {
         memberSpend: member ? await this.memberSpend(member.id) : undefined,
         allowanceAvailableCents:
           member?.kind === "teen" ? (await this.allowanceOf(member.id)).availableCents : undefined,
+        cardLimits,
+        cardSpend: cardLimits ? await this.cardSpendEvents(cardId) : undefined,
+        householdCapCents,
+        householdSpend:
+          household && householdCapCents != null
+            ? await this.householdCardSpend(household.id)
+            : undefined,
         now,
       },
       this.policy,
@@ -1274,12 +1682,21 @@ export class HarborService {
     } catch (e) {
       throw new ApiError(422, "capture_rejected", (e as Error).message);
     }
+    // 1% cashback on the captured amount, credited to the card's own account (its own ledger txn).
+    const card = await this.store.one("cards", { id: a.card_id });
+    const cashback = cashbackForCapture(plan.capturedCents, this.policy);
+    const cbLedger =
+      cashback > 0 && card
+        ? { ...cashbackLedger(authId, card.account_id, cashback), idem: `cashback:${authId}` }
+        : null;
     await this.store
       .cardCapture({
         authId,
         capturedCents: plan.capturedCents,
         feeCents: plan.feeCents,
         ledger: { ...plan.ledger, idem: `capture:${authId}` },
+        cashbackLedger: cbLedger,
+        cashbackCents: cashback,
         at: this.now().toISOString(),
       })
       .catch((e) => this.opFailed(e, { status: 422, code: "capture_rejected" }));
@@ -1288,6 +1705,7 @@ export class HarborService {
       capturedCents: plan.capturedCents,
       feeCents: plan.feeCents,
       releasedCents: plan.releasedCents,
+      cashbackCents: cashback,
     };
   }
 
@@ -1312,12 +1730,29 @@ export class HarborService {
     }
     if (plan.duplicate)
       return { refundId, duplicate: true, refundedCents: Number(a.refunded_cents) };
+    // Reverse cashback pro-rata to the refund (its own ledger txn on the card's account).
+    const card = await this.store.one("cards", { id: a.card_id });
+    const reversal = cashbackReversal({
+      cashbackCents: Number(a.cashback_cents),
+      capturedCents: Number(a.captured_cents),
+      refundedSoFarCents: Number(a.refunded_cents),
+      refundAmountCents: amountCents,
+    });
+    const revLedger =
+      reversal > 0 && card
+        ? {
+            ...cashbackReversalLedger(refundId, card.account_id, reversal),
+            idem: `cashback_rev:${refundId}`,
+          }
+        : null;
     const r = await this.store
       .cardRefund({
         refundId,
         authId,
         amountCents,
         ledger: { ...plan.ledger, idem: `refund:${refundId}` },
+        cashbackReversalLedger: revLedger,
+        cashbackReversalCents: reversal,
         at: this.now().toISOString(),
       })
       .catch((e) =>
@@ -1328,7 +1763,12 @@ export class HarborService {
             : { status: 422, code: "refund_rejected" },
         ),
       );
-    return { refundId, duplicate: r.duplicate, refundedCents: r.refundedCents };
+    return {
+      refundId,
+      duplicate: r.duplicate,
+      refundedCents: r.refundedCents,
+      cashbackReversedCents: reversal,
+    };
   }
 
   async expireAuths(c: Caller | null) {
@@ -1491,6 +1931,263 @@ export class HarborService {
       })
       .catch((e) => this.opFailed(e, { status: 422, code: "allowance_rejected" }));
     return { id: tid, memberId: id, allowance: await this.allowanceOf(id) };
+  }
+
+  // ---------- Zelle bill pay ----------
+  /** Send one Zelle payment now: plan the funding (source first, shortfall pulled from other
+   *  pockets), call the provider, then atomically debit and record it. */
+  private async sendOneZelle(p: {
+    userId: string;
+    source: Row;
+    recipient: ZelleRecipient;
+    amountCents: number;
+    memo?: string;
+    scheduleId?: string | null;
+    idempotencyKey?: string;
+  }): Promise<{ id: string; shortfallCents: number }> {
+    const prof = await this.profile(p.userId);
+    const spendable = await this.spendableForZelle(p.userId, p.source);
+    const id = uuid();
+    let plan;
+    try {
+      plan = planZelleSend({
+        transferId: id,
+        fromAccountId: p.source.id,
+        amountCents: p.amountCents,
+        recipient: p.recipient,
+        spendable,
+        now: this.now(),
+      });
+    } catch (e) {
+      if (e instanceof ZelleError) throw new ApiError(422, e.code, e.message);
+      throw e;
+    }
+    const sent = await this.providers.zelle
+      .send({
+        paymentId: id,
+        fromName: prof.legal_name,
+        recipient: p.recipient,
+        amountCents: p.amountCents,
+        memo: p.memo,
+      })
+      .catch((e) => {
+        throw new ApiError(502, "zelle_provider_error", (e as Error).message);
+      });
+    const providerRef = sent.providerRef;
+    const at = this.now().toISOString();
+    await this.store
+      .zelleSend({
+        transfer: {
+          id,
+          user_id: p.userId,
+          kind: "zelle",
+          speed: null,
+          from_account_id: p.source.id,
+          to_account_id: null,
+          linked_bank_id: null,
+          counterparty_user_id: null,
+          family_member_id: null,
+          amount_cents: p.amountCents,
+          fee_cents: 0,
+          status: "completed",
+          settle_at: null,
+          return_code: null,
+          new_payee: false,
+          policy_version: this.policy.version,
+          fee_version: this.fees.version,
+          idempotency_key: p.idempotencyKey ? `${p.userId}:${p.idempotencyKey}` : null,
+          created_at: at,
+          settled_at: null,
+        },
+        ledger: { ...plan.ledger, idem: `transfer:${id}` },
+        payment: {
+          id: uuid(),
+          transfer_id: id,
+          schedule_id: p.scheduleId ?? null,
+          recipient_email: p.recipient.email ?? null,
+          recipient_phone: p.recipient.phone ?? null,
+          memo: p.memo ?? null,
+          provider_ref: providerRef,
+          status: "sent",
+          returned_at: null,
+          return_reason: null,
+          created_at: at,
+        },
+        limit: limitWindow(prof.tier, "transfer_out", this.now(), this.policy),
+        at,
+      })
+      .catch((e) => this.opFailed(e));
+    return { id, shortfallCents: plan.shortfallCents };
+  }
+
+  async zellePay(
+    c: Caller,
+    body: {
+      fromAccountId: string;
+      recipient: ZelleRecipient;
+      amountCents: number;
+      memo?: string;
+      frequency?: ZelleFrequency;
+      startDate?: string;
+      idempotencyKey?: string;
+    },
+  ) {
+    const p = await this.profile(c.userId);
+    if (!canMoveMoney(p.kyc_state))
+      throw new ApiError(403, "kyc_not_approved", "complete verification first");
+    const freq: ZelleFrequency = body.frequency ?? "once";
+    if (!isValidFrequency(freq))
+      throw new ApiError(422, "invalid_frequency", "frequency must be once, weekly or monthly");
+    if (!validateRecipient(body.recipient))
+      throw new ApiError(422, "invalid_recipient", "a valid email or phone is required");
+    const source = await this.accountOf(c.userId, body.fromAccountId);
+    if (source.status !== "open") throw new ApiError(409, "account_frozen");
+    const now = this.now();
+
+    if (freq === "once") {
+      const r = await this.sendOneZelle({
+        userId: c.userId,
+        source,
+        recipient: body.recipient,
+        amountCents: body.amountCents,
+        memo: body.memo,
+        idempotencyKey: body.idempotencyKey,
+      });
+      return {
+        id: r.id,
+        frequency: "once",
+        status: "completed",
+        amountCents: body.amountCents,
+        shortfallCents: r.shortfallCents,
+      };
+    }
+
+    if (body.startDate && !/^\d{4}-\d{2}-\d{2}$/.test(body.startDate))
+      throw new ApiError(422, "invalid_start_date", "startDate must be YYYY-MM-DD");
+    const startAt = body.startDate ? new Date(`${body.startDate}T00:00:00.000Z`) : now;
+    const scheduleId = uuid();
+    let firstPaymentId: string | null = null;
+    let nextRunAt = startAt;
+    // Create the schedule first (a first payment's record references it); if the first send can't
+    // be funded, cancel the schedule so a failed setup leaves nothing active.
+    await this.store.insert("zelle_schedules", {
+      id: scheduleId,
+      user_id: c.userId,
+      from_account_id: source.id,
+      recipient_email: body.recipient.email ?? null,
+      recipient_phone: body.recipient.phone ?? null,
+      memo: body.memo ?? null,
+      amount_cents: body.amountCents,
+      frequency: freq,
+      next_run_at: startAt.toISOString(),
+      last_run_at: null,
+      status: "active",
+      created_at: now.toISOString(),
+    });
+    if (startAt.getTime() <= now.getTime()) {
+      try {
+        const r = await this.sendOneZelle({
+          userId: c.userId,
+          source,
+          recipient: body.recipient,
+          amountCents: body.amountCents,
+          memo: body.memo,
+          scheduleId,
+          idempotencyKey: body.idempotencyKey,
+        });
+        firstPaymentId = r.id;
+        nextRunAt = nextZelleRun(startAt, freq)!;
+        await this.store.update(
+          "zelle_schedules",
+          { id: scheduleId },
+          { next_run_at: nextRunAt.toISOString(), last_run_at: now.toISOString() },
+        );
+      } catch (e) {
+        await this.store.update("zelle_schedules", { id: scheduleId }, { status: "canceled" });
+        throw e;
+      }
+    }
+    return {
+      scheduleId,
+      frequency: freq,
+      status: "scheduled",
+      nextRunAt: nextRunAt.toISOString(),
+      firstPaymentId,
+      amountCents: body.amountCents,
+    };
+  }
+
+  /** Job: send every recurring Zelle schedule whose next run is due; advance its cadence. */
+  async runZelle(c: Caller | null) {
+    if (c) this.requireStaff(c);
+    const now = this.now();
+    let sent = 0;
+    for (const s of await this.store.list("zelle_schedules", { status: "active" })) {
+      if (!s.next_run_at || new Date(s.next_run_at).getTime() > now.getTime()) continue;
+      const next = nextZelleRun(new Date(s.next_run_at), s.frequency as ZelleFrequency);
+      const source = await this.store.one("accounts", { id: s.from_account_id });
+      if (source && source.status === "open") {
+        try {
+          await this.sendOneZelle({
+            userId: s.user_id,
+            source,
+            recipient: {
+              email: s.recipient_email ?? undefined,
+              phone: s.recipient_phone ?? undefined,
+            },
+            amountCents: Number(s.amount_cents),
+            memo: s.memo ?? undefined,
+            scheduleId: s.id,
+          });
+          sent++;
+        } catch (e) {
+          // Insufficient funds or a closed source: skip this run and move to the next period.
+          await this.audit(
+            null,
+            "zelle_schedule_skipped",
+            "zelle_schedule",
+            s.id,
+            (e as Error).message,
+          );
+        }
+      }
+      await this.store.update(
+        "zelle_schedules",
+        { id: s.id },
+        { next_run_at: next?.toISOString() ?? null, last_run_at: now.toISOString() },
+      );
+    }
+    return { sent };
+  }
+
+  /** A Zelle return/refund (webhook, or admin-simulated): reverse the credit into the source pocket. */
+  async zelleReturn(c: Caller | null, transferId: string, reason: string | null) {
+    if (c) this.requireStaff(c);
+    const t = await this.store.one("transfers", { id: transferId });
+    if (!t || t.kind !== "zelle") throw new ApiError(404, "not_found", "Zelle payment not found");
+    const plan = planZelleReturn({
+      transferId: t.id,
+      toAccountId: t.from_account_id,
+      amountCents: Number(t.amount_cents),
+    });
+    await this.store
+      .zelleReturn({
+        transferId: t.id,
+        code: reason ?? null,
+        ledger: { ...plan.ledger, idem: `zelle_return:${t.id}` },
+        at: this.now().toISOString(),
+        actorId: c?.userId ?? null,
+        audit: { reason: reason ?? null },
+      })
+      .catch((e) => this.opFailed(e, { status: 409, code: "already_returned" }));
+    return { transferId: t.id, reversed: true, amountCents: Number(t.amount_cents) };
+  }
+
+  /** Resolve a Zelle payment by its provider reference (for the inbound webhook), then return it. */
+  async zelleReturnByRef(providerRef: string, reason: string | null) {
+    const pay = await this.store.one("zelle_payments", { provider_ref: providerRef });
+    if (!pay) throw new ApiError(404, "not_found", "Zelle payment not found");
+    return this.zelleReturn(null, pay.transfer_id, reason);
   }
 
   // ---------- disputes ----------

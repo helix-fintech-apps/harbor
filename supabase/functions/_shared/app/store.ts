@@ -105,6 +105,33 @@ export interface MoneyOps {
     ledger: LedgerPost;
     at: string;
   }): Promise<{ replayed: boolean }>;
+  /** Zelle bill pay out. The ledger debits one or more of the user's pockets (source first, then
+   *  the pulled shortfall) and credits zelle_clearing; each debited pocket is locked and re-checked
+   *  for enough available balance, and the transfer-out tier limit still holds. */
+  zelleSend(p: {
+    transfer: Row;
+    ledger: LedgerPost;
+    payment: Row;
+    limit: LimitWindow | null;
+    at: string;
+  }): Promise<{ replayed: boolean }>;
+  /** Zelle return/refund webhook: reverse the credit back into the source pocket, once per payment. */
+  zelleReturn(p: {
+    transferId: string;
+    code: string | null;
+    ledger: LedgerPost;
+    at: string;
+    actorId: string | null;
+    audit: Row;
+  }): Promise<{ reversed: boolean }>;
+  /** Auto-close a due envelope: sweep its remaining balance to primary checking and close it.
+   *  closed=false when it can't yet (not due, has active holds, or negative balance). */
+  closeEnvelope(p: {
+    envelopeId: string;
+    primaryCheckingId: string;
+    ledger: LedgerPost | null;
+    at: string;
+  }): Promise<{ closed: boolean; sweptCents: number }>;
   /** Record an authorization; with a hold, re-check the funding pocket (else record a decline). */
   cardAuthorize(p: { auth: Row; hold: Row | null; at: string }): Promise<{
     approved: boolean;
@@ -112,22 +139,28 @@ export interface MoneyOps {
     holdId: string | null;
     replayed: boolean;
   }>;
-  /** Capture (partial / over-capture within tolerance): ledger + hold consumed + auth captured. */
+  /** Capture (partial / over-capture within tolerance): ledger + hold consumed + auth captured.
+   *  With a cashback ledger, also posts 1% cashback to the card's account (its own balanced txn). */
   cardCapture(p: {
     authId: string;
     capturedCents: number;
     feeCents: number;
     ledger: LedgerPost;
+    cashbackLedger?: LedgerPost | null;
+    cashbackCents?: number;
     at: string;
   }): Promise<void>;
   /** Expire an uncaptured auth past its validity and release its hold. false = not expirable. */
   cardExpireAuth(p: { authId: string; at: string }): Promise<boolean>;
-  /** Merchant refund, once per refund id, never above captured - refunded. */
+  /** Merchant refund, once per refund id, never above captured - refunded. With a cashback
+   *  reversal ledger, also claws back the pro-rata cashback (its own balanced txn). */
   cardRefund(p: {
     refundId: string;
     authId: string;
     amountCents: number;
     ledger: LedgerPost;
+    cashbackReversalLedger?: LedgerPost | null;
+    cashbackReversalCents?: number;
     at: string;
   }): Promise<{ duplicate: boolean; refundedCents: number }>;
   /** Open a dispute on a captured purchase (one open dispute per purchase). Returns the row. */
@@ -318,7 +351,7 @@ export class MemoryStore implements Store {
     if (!limit) return;
     const kinds =
       limit.kind === "transfer_out"
-        ? ["ach_out", "p2p"]
+        ? ["ach_out", "p2p", "zelle"]
         : limit.kind === "ach_in"
           ? ["ach_in"]
           : fail("payload_mismatch", `unknown limit kind ${limit.kind}`);
@@ -332,7 +365,7 @@ export class MemoryStore implements Store {
         t.user_id !== userId ||
         !kinds.includes(t.kind) ||
         t.status === "failed" ||
-        (t.kind === "ach_in" && t.status === "returned")
+        t.status === "returned" // returned deposits (ach_in) and Zelle sends don't count
       )
         continue;
       const ts = new Date(t.created_at).getTime();
@@ -591,6 +624,122 @@ export class MemoryStore implements Store {
     });
   }
 
+  zelleSend(p: {
+    transfer: Row;
+    ledger: LedgerPost;
+    payment: Row;
+    limit: LimitWindow | null;
+    at: string;
+  }) {
+    return this.tx(() => {
+      const t = p.transfer;
+      if (t.kind !== "zelle") fail("payload_mismatch", "not a Zelle send");
+      if (this.row("transfers", { id: t.id })) return { replayed: true };
+      const amount = Number(t.amount_cents);
+      if (netDebit(p.ledger, "zelle_clearing", null) !== -amount)
+        fail("payload_mismatch", "a Zelle send credits zelle_clearing the full amount");
+      // Every funding pocket (source first, then the pulled shortfall) is re-checked under lock.
+      const debits = new Map<string, number>();
+      for (const l of p.ledger.lines)
+        if (l.account === "customer_deposits")
+          debits.set(l.party!, (debits.get(l.party!) ?? 0) + l.debit - l.credit);
+      let total = 0;
+      for (const [acctId, drAmt] of debits) {
+        if (drAmt <= 0) fail("payload_mismatch", "each funding pocket must be net debited");
+        const acct = this.row("accounts", { id: acctId });
+        if (!acct) return fail("not_found", "funding account not found");
+        if (acct.user_id !== t.user_id)
+          fail("payload_mismatch", "a funding pocket belongs to another customer");
+        if (acct.status !== "open") fail("invalid_state", "a funding pocket is not open");
+        const avail = this.available(acctId, p.at);
+        if (drAmt > avail)
+          fail("insufficient_funds", `pocket ${acctId}: available ${avail}, needed ${drAmt}`);
+        total += drAmt;
+      }
+      if (total !== amount) fail("payload_mismatch", "funding debits must sum to the amount");
+      this.checkLimit(t.user_id, p.limit, amount, p.at);
+      this.put("transfers", { fee_cents: 0, new_payee: false, created_at: p.at, ...t });
+      this.post(p.ledger, p.at);
+      this.put("zelle_payments", { status: "sent", created_at: p.at, ...p.payment });
+      return { replayed: false };
+    });
+  }
+
+  zelleReturn(p: {
+    transferId: string;
+    code: string | null;
+    ledger: LedgerPost;
+    at: string;
+    actorId: string | null;
+    audit: Row;
+  }) {
+    return this.tx(() => {
+      const t = this.row("transfers", { id: p.transferId });
+      if (!t || t.kind !== "zelle") return fail("not_found", "Zelle payment not found");
+      if (t.status === "returned") fail("already_returned", "already returned");
+      if (netDebit(p.ledger, "customer_deposits", t.from_account_id) !== -Number(t.amount_cents))
+        fail("payload_mismatch", "a Zelle return credits the source pocket the sent amount");
+      this.post(p.ledger, p.at);
+      Object.assign(t, { status: "returned", return_code: null });
+      this.patch(
+        "zelle_payments",
+        { transfer_id: p.transferId },
+        { status: "returned", returned_at: p.at, return_reason: p.code },
+      );
+      this.put("audit_log", {
+        actor_id: p.actorId,
+        action: "zelle_return",
+        entity: "transfer",
+        entity_id: p.transferId,
+        reason: p.code,
+        data: p.audit,
+        created_at: p.at,
+      });
+      return { reversed: true };
+    });
+  }
+
+  closeEnvelope(p: {
+    envelopeId: string;
+    primaryCheckingId: string;
+    ledger: LedgerPost | null;
+    at: string;
+  }) {
+    return this.tx(() => {
+      const env = this.row("accounts", { id: p.envelopeId });
+      if (!env || env.kind !== "envelope" || env.status !== "open")
+        return { closed: false, sweptCents: 0 };
+      if (env.end_date && new Date(p.at).toISOString().slice(0, 10) < env.end_date)
+        return { closed: false, sweptCents: 0 }; // not due yet
+      if (this.activeHolds((h) => h.account_id === p.envelopeId, p.at) > 0)
+        return { closed: false, sweptCents: 0 }; // holds outstanding: retry next run
+      const bal = this.posted("customer_deposits", p.envelopeId);
+      if (bal < 0) return { closed: false, sweptCents: 0 }; // never sweep a negative balance
+      if (bal > 0) {
+        const ledger = p.ledger;
+        if (
+          !ledger ||
+          netDebit(ledger, "customer_deposits", p.envelopeId) !== bal ||
+          netDebit(ledger, "customer_deposits", p.primaryCheckingId) !== -bal
+        )
+          return fail(
+            "payload_mismatch",
+            "sweep must move the envelope balance to primary checking",
+          );
+        const chk = this.row("accounts", { id: p.primaryCheckingId });
+        if (!chk || chk.user_id !== env.user_id || chk.status === "closed")
+          return fail("not_found", "primary checking is unavailable for the sweep");
+        this.post(ledger, p.at);
+      } else if (p.ledger) {
+        fail("payload_mismatch", "a zero-balance envelope needs no sweep ledger");
+      }
+      if (this.posted("customer_deposits", p.envelopeId) !== 0)
+        fail("payload_mismatch", "sweep must leave the envelope at zero");
+      Object.assign(env, { status: "closed", closed_at: p.at });
+      return { closed: true, sweptCents: bal };
+    });
+  }
+
   cardAuthorize(p: { auth: Row; hold: Row | null; at: string }) {
     return this.tx(() => {
       const { auth, hold } = p;
@@ -612,6 +761,8 @@ export class MemoryStore implements Store {
         atm_out_of_network: false,
         captured_cents: 0,
         refunded_cents: 0,
+        cashback_cents: 0,
+        cashback_reversed_cents: 0,
         created_at: p.at,
       };
       if (!hold) {
@@ -661,6 +812,8 @@ export class MemoryStore implements Store {
     capturedCents: number;
     feeCents: number;
     ledger: LedgerPost;
+    cashbackLedger?: LedgerPost | null;
+    cashbackCents?: number;
     at: string;
   }) {
     return this.tx(() => {
@@ -677,12 +830,22 @@ export class MemoryStore implements Store {
       ) {
         fail("payload_mismatch", "capture must debit the funding pocket captured + fees");
       }
+      const cashback = Number(p.cashbackCents ?? 0);
+      const card = this.row("cards", { id: a.card_id });
+      if (cashback > 0) {
+        if (!p.cashbackLedger || netDebit(p.cashbackLedger, "cashback_expense", null) !== cashback)
+          fail("payload_mismatch", "cashback ledger must debit cashback_expense the cashback");
+        if (!card || netDebit(p.cashbackLedger, "customer_deposits", card.account_id) !== -cashback)
+          fail("payload_mismatch", "cashback must be credited to the card's account");
+      }
       this.post(p.ledger, p.at);
+      if (cashback > 0) this.post(p.cashbackLedger!, p.at);
       this.patch("holds", { id: a.hold_id }, { status: "captured", released_at: p.at });
       Object.assign(a, {
         status: "captured",
         captured_cents: p.capturedCents,
         fee_cents: p.feeCents,
+        cashback_cents: cashback,
         captured_at: p.at,
       });
     });
@@ -703,6 +866,8 @@ export class MemoryStore implements Store {
     authId: string;
     amountCents: number;
     ledger: LedgerPost;
+    cashbackReversalLedger?: LedgerPost | null;
+    cashbackReversalCents?: number;
     at: string;
   }) {
     return this.tx(() => {
@@ -726,6 +891,18 @@ export class MemoryStore implements Store {
       }
       if (netDebit(p.ledger, a.funding_account, a.funding_party) !== -p.amountCents)
         fail("payload_mismatch", "refund must credit the funding pocket the refund amount");
+      const reversal = Number(p.cashbackReversalCents ?? 0);
+      const card = this.row("cards", { id: a.card_id });
+      if (reversal > 0) {
+        if (reversal > Number(a.cashback_cents) - Number(a.cashback_reversed_cents))
+          fail("payload_mismatch", "cashback reversal exceeds the cashback earned");
+        if (
+          !p.cashbackReversalLedger ||
+          !card ||
+          netDebit(p.cashbackReversalLedger, "customer_deposits", card.account_id) !== reversal
+        )
+          fail("payload_mismatch", "cashback reversal must debit the card's account");
+      }
       this.put("card_refunds", {
         id: p.refundId,
         auth_id: p.authId,
@@ -733,7 +910,9 @@ export class MemoryStore implements Store {
         created_at: p.at,
       });
       this.post(p.ledger, p.at);
+      if (reversal > 0) this.post(p.cashbackReversalLedger!, p.at);
       a.refunded_cents = Number(a.refunded_cents) + p.amountCents;
+      a.cashback_reversed_cents = Number(a.cashback_reversed_cents) + reversal;
       return { duplicate: false, refundedCents: a.refunded_cents as number };
     });
   }
@@ -1104,6 +1283,54 @@ export class SupabaseStore implements Store {
   allowanceTopUp(p: { transfer: Row; ledger: LedgerPost; at: string }) {
     return this.transferOut("harbor_allowance_topup", p);
   }
+  async zelleSend(p: {
+    transfer: Row;
+    ledger: LedgerPost;
+    payment: Row;
+    limit: LimitWindow | null;
+    at: string;
+  }) {
+    const r = await this.rpc<{ replayed: boolean }>("harbor_zelle_send", {
+      p_transfer: p.transfer,
+      p_ledger: SupabaseStore.ledgerArg(p.ledger),
+      p_payment: p.payment,
+      p_limit: SupabaseStore.limitArg(p.limit),
+      p_at: p.at,
+    });
+    return { replayed: !!r.replayed };
+  }
+  async zelleReturn(p: {
+    transferId: string;
+    code: string | null;
+    ledger: LedgerPost;
+    at: string;
+    actorId: string | null;
+    audit: Row;
+  }) {
+    const r = await this.rpc<{ reversed: boolean }>("harbor_zelle_return", {
+      p_transfer_id: p.transferId,
+      p_code: p.code,
+      p_ledger: SupabaseStore.ledgerArg(p.ledger),
+      p_at: p.at,
+      p_actor: p.actorId,
+      p_audit: p.audit,
+    });
+    return { reversed: !!r.reversed };
+  }
+  async closeEnvelope(p: {
+    envelopeId: string;
+    primaryCheckingId: string;
+    ledger: LedgerPost | null;
+    at: string;
+  }) {
+    const r = await this.rpc<{ closed: boolean; swept_cents: number }>("harbor_close_envelope", {
+      p_envelope_id: p.envelopeId,
+      p_primary_checking_id: p.primaryCheckingId,
+      p_ledger: SupabaseStore.ledgerArg(p.ledger),
+      p_at: p.at,
+    });
+    return { closed: !!r.closed, sweptCents: Number(r.swept_cents) };
+  }
   async cardAuthorize(p: { auth: Row; hold: Row | null; at: string }) {
     const r = await this.rpc<{
       approved: boolean;
@@ -1123,6 +1350,8 @@ export class SupabaseStore implements Store {
     capturedCents: number;
     feeCents: number;
     ledger: LedgerPost;
+    cashbackLedger?: LedgerPost | null;
+    cashbackCents?: number;
     at: string;
   }) {
     await this.rpc("harbor_card_capture", {
@@ -1130,6 +1359,8 @@ export class SupabaseStore implements Store {
       p_captured_cents: p.capturedCents,
       p_fee_cents: p.feeCents,
       p_ledger: SupabaseStore.ledgerArg(p.ledger),
+      p_cashback_ledger: SupabaseStore.ledgerArg(p.cashbackLedger ?? null),
+      p_cashback_cents: p.cashbackCents ?? 0,
       p_at: p.at,
     });
   }
@@ -1141,6 +1372,8 @@ export class SupabaseStore implements Store {
     authId: string;
     amountCents: number;
     ledger: LedgerPost;
+    cashbackReversalLedger?: LedgerPost | null;
+    cashbackReversalCents?: number;
     at: string;
   }) {
     const r = await this.rpc<{ duplicate: boolean; refunded_cents: number }>("harbor_card_refund", {
@@ -1148,6 +1381,8 @@ export class SupabaseStore implements Store {
       p_auth_id: p.authId,
       p_amount_cents: p.amountCents,
       p_ledger: SupabaseStore.ledgerArg(p.ledger),
+      p_cashback_reversal_ledger: SupabaseStore.ledgerArg(p.cashbackReversalLedger ?? null),
+      p_cashback_reversal_cents: p.cashbackReversalCents ?? 0,
       p_at: p.at,
     });
     return { duplicate: !!r.duplicate, refundedCents: Number(r.refunded_cents) };
