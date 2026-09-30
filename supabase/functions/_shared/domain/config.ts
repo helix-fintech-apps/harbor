@@ -53,6 +53,9 @@ export interface MoneyPolicy {
     savingsApyBps: number; // applied as a simple daily rate: apy / 365 (documented)
     dayCountBasis: number;
   };
+  cashback: {
+    rateBps: number; // debit-card cashback on capture (100 bps = 1%); reversed pro-rata on refund
+  };
   holidays: string[]; // YYYY-MM-DD, non-business days for ACH/dispute timelines
 }
 
@@ -111,6 +114,7 @@ export const DEFAULT_POLICY: MoneyPolicy = {
     newAccountDays: 30,
   },
   interest: { savingsApyBps: 400, dayCountBasis: 365 },
+  cashback: { rateBps: 100 }, // 1% debit-card cashback
   holidays: [
     "2026-01-01",
     "2026-05-25",

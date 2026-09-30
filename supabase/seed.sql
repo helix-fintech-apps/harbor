@@ -81,11 +81,11 @@ checks as (
 update public.profiles p set kyc_state = c.decision from checks c where p.id = c.user_id;
 
 -- 4. Accounts (opened on approval), linked banks past the 72h cooling-off -------------------------
-insert into public.accounts (id, user_id, kind, status, account_number, routing_number, nickname, policy_version, opened_at) values
-  ('10000000-0000-4000-8000-00000000a0a1', '00000000-0000-4000-8000-00000000a0a0', 'checking', 'open', '880018499015', '091000019', 'Everyday', 1, now() - interval '7 days'),
-  ('10000000-0000-4000-8000-00000000a0a2', '00000000-0000-4000-8000-00000000a0a0', 'savings',  'open', '880035276634', '091000019', 'Savings',  1, now() - interval '7 days'),
-  ('10000000-0000-4000-8000-00000000b0b1', '00000000-0000-4000-8000-00000000b0b0', 'checking', 'open', '880042039887', '091000019', 'Everyday', 1, now() - interval '7 days'),
-  ('10000000-0000-4000-8000-00000000b0b2', '00000000-0000-4000-8000-00000000b0b0', 'savings',  'open', '880058817506', '091000019', 'Savings',  1, now() - interval '7 days')
+insert into public.accounts (id, user_id, kind, status, account_number, routing_number, nickname, is_primary, policy_version, opened_at) values
+  ('10000000-0000-4000-8000-00000000a0a1', '00000000-0000-4000-8000-00000000a0a0', 'checking', 'open', '880018499015', '091000019', 'Everyday', true,  1, now() - interval '7 days'),
+  ('10000000-0000-4000-8000-00000000a0a2', '00000000-0000-4000-8000-00000000a0a0', 'savings',  'open', '880035276634', '091000019', 'Savings',  false, 1, now() - interval '7 days'),
+  ('10000000-0000-4000-8000-00000000b0b1', '00000000-0000-4000-8000-00000000b0b0', 'checking', 'open', '880042039887', '091000019', 'Everyday', true,  1, now() - interval '7 days'),
+  ('10000000-0000-4000-8000-00000000b0b2', '00000000-0000-4000-8000-00000000b0b0', 'savings',  'open', '880058817506', '091000019', 'Savings',  false, 1, now() - interval '7 days')
 on conflict do nothing;
 
 insert into public.linked_banks (id, user_id, provider, provider_item_id, provider_account_id, institution, mask, owner_names, name_matched, status, linked_at) values

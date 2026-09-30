@@ -17,6 +17,11 @@ export function assertNoLiveKeys(env: Env): void {
       `Refusing PLAID_ENV=${env.PLAID_ENV}. Only the Plaid sandbox is allowed.`,
     );
   }
+  if (env.ZELLE_ENV && env.ZELLE_ENV !== "sandbox") {
+    throw new LiveKeyRefused(
+      `Refusing ZELLE_ENV=${env.ZELLE_ENV}. Only the Zelle sandbox is allowed.`,
+    );
+  }
 }
 
 export function useStripe(env: Env): boolean {
@@ -27,6 +32,11 @@ export function useStripe(env: Env): boolean {
 export function usePlaid(env: Env): boolean {
   assertNoLiveKeys(env);
   return !!env.PLAID_CLIENT_ID && !!env.PLAID_SECRET && env.HARBOR_FORCE_FAKE !== "1";
+}
+
+export function useZelle(env: Env): boolean {
+  assertNoLiveKeys(env);
+  return !!env.ZELLE_API_KEY && env.ZELLE_ENV === "sandbox" && env.HARBOR_FORCE_FAKE !== "1";
 }
 
 export async function stripeRequest(

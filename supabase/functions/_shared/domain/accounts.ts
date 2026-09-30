@@ -1,11 +1,50 @@
 // Accounts (checking + savings pockets), fake account/routing numbers, and balances.
 // Posted balance = ledger (credits - debits). Available = posted - active holds.
 
-import type { Line } from "./ledger.ts";
-import { partyBalance } from "./ledger.ts";
+import type { Line, Txn } from "./ledger.ts";
+import { cr, dr, partyBalance, txn } from "./ledger.ts";
+import { isoDate } from "./time.ts";
 
-export type AccountKind = "checking" | "savings";
+export type AccountKind = "checking" | "savings" | "envelope";
 export type AccountStatus = "open" | "frozen" | "closing" | "closed";
+
+/**
+ * A temporary "envelope" pocket runs from a start date to an end date. On its end date it
+ * auto-closes and its remaining balance sweeps into the user's primary checking. Dates are
+ * YYYY-MM-DD (UTC calendar days); the envelope has reached its end once the end day has arrived.
+ */
+export function validateEnvelopeDates(startDate: string, endDate: string): string[] {
+  const errs: string[] = [];
+  const iso = /^\d{4}-\d{2}-\d{2}$/;
+  if (!iso.test(startDate)) errs.push("startDate must be YYYY-MM-DD");
+  if (!iso.test(endDate)) errs.push("endDate must be YYYY-MM-DD");
+  if (errs.length) return errs;
+  if (endDate <= startDate) errs.push("endDate must be after startDate");
+  return errs;
+}
+
+/** True once the envelope's end date has arrived (inclusive: the end day itself sweeps + closes). */
+export function envelopeReachedEnd(endDate: string | null | undefined, now: Date): boolean {
+  if (!endDate) return false;
+  return isoDate(now) >= endDate;
+}
+
+/** The ledger txn that sweeps an envelope's remaining balance into the primary checking pocket. */
+export function planEnvelopeSweep(p: {
+  envelopeId: string;
+  primaryCheckingId: string;
+  remainingCents: number;
+}): Txn | null {
+  if (p.remainingCents <= 0) return null;
+  return txn(
+    "envelope_sweep",
+    [
+      dr("customer_deposits", p.remainingCents, p.envelopeId),
+      cr("customer_deposits", p.remainingCents, p.primaryCheckingId),
+    ],
+    p.envelopeId,
+  );
+}
 
 /** Harbor's fake routing number (passes the ABA checksum; not a real bank). */
 export const HARBOR_ROUTING_NUMBER = "091000019";

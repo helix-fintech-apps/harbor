@@ -20,7 +20,8 @@ Business banking is a separate app (app 3); Harbor has no business accounts.
 - Every money event posts a balanced double-entry txn (`ledger.ts` → `ledger_txns` + `ledger_lines`).
   A DEFERRABLE constraint trigger rejects unbalanced txns at commit; the ledger is append-only (update/delete raise).
 - **Atomic money operations.** Every money operation that writes more than one row (ACH pull + hold, ACH settle, ACH return,
-  withdrawal + fee, P2P + payee, pocket move, allowance top-up, card authorization + hold, capture, auth expiry, merchant refund,
+  withdrawal + fee, P2P + payee, pocket move / internal transfer, allowance top-up, Zelle send (multi-pocket debit) + return,
+  envelope close + sweep, card authorization + hold, capture (+ cashback), auth expiry, merchant refund (+ cashback reversal),
   dispute open / provisional credit / resolve, interest posting, account closure) is ONE Postgres function
   (`harbor_*`, migration `20260924000004_atomic_money_ops.sql`) called via RPC by `SupabaseStore`; `MemoryStore` implements the same
   operation with the same guards and rolls back all of its writes on failure. The domain still plans the amounts; the operation
@@ -39,7 +40,8 @@ Business banking is a separate app (app 3); Harbor has no business accounts.
   - Identity: `FakeIdentity` | `StripeIdentity` (Stripe Identity, `sk_test_` only).
   - Bank link: `FakeBankLink` | `PlaidSandbox` (REST: `/link/token/create`, `/item/public_token/exchange`, `/auth/get`, `/identity/get`).
   - Card issuing: `FakeIssuer` | `StripeIssuing` (Stripe Issuing test mode; real-time auth via `issuing_authorization.request` webhook).
-  - Refuse to boot with `sk_live_`/`rk_live_` or `PLAID_ENV` ≠ `sandbox`.
+  - Zelle bill pay: `FakeZelle` | `ZelleSandbox` (sandbox REST; returns arrive as `/webhooks/zelle` events).
+  - Refuse to boot with `sk_live_`/`rk_live_`, `PLAID_ENV` ≠ `sandbox`, or `ZELLE_ENV` ≠ `sandbox`.
 
 ## Domain rules (policy v1)
 
@@ -68,7 +70,16 @@ States: `unverified → pending | needs_review | approved | rejected | frozen_le
 
 ### Accounts (`accounts.ts`)
 
-One live checking + one savings pocket per user, opened on KYC approval. Fake routing `091000019` (ABA-checksum valid), 12-digit account numbers `8800…`.
+A primary checking + a savings pocket open on KYC approval. Fake routing `091000019` (ABA-checksum valid), 12-digit account numbers `8800…`.
+**On demand** a customer opens more pockets (`POST /accounts`): extra `checking`/`savings`, or a temporary `envelope` with a `startDate` and `endDate`. Exactly one checking is the **primary** (the sweep target and the default for cards, ACH out, allowances and Zelle). An envelope requires an end date; on that UTC day it **auto-closes** (`/admin/jobs/close-envelopes`) and sweeps its remaining balance into the primary checking in one ledger txn (skipped, to retry, if the envelope still has active holds or a negative balance). Envelopes are earmarked, so they never fund cards and are not raided for Zelle shortfalls.
+
+### Instant internal transfers (`transfers.ts`)
+
+`POST /transfers/internal` moves money instantly between any two of the customer's own pockets (`planPocketMove`, kind `pocket`), guarded by the source's available balance; not subject to tier limits. (`/transfers/pocket` is the checking↔savings shortcut.)
+
+### Households (`households.ts`)
+
+A customer creates a household (`POST /households`, at most one per owner), invites members by email (`POST /households/:id/invite`), and the invitee accepts (`POST /households/invites/:id/accept`, only the invited email, and only if not already in a household). A household has an optional **overall monthly card-spend cap across all members and all cards**, enforced at authorization on top of each card's and member's own limits (UTC calendar month, inclusive).
 
 ### Money in (`achIn.ts`)
 
@@ -84,13 +95,27 @@ One live checking + one savings pocket per user, opened on KYC approval. Fake ro
 - P2P to another approved Harbor user; min $1.00; not to self; **first payment to a new payee requires step-up** (fake code `000000`).
 - Pocket moves checking ↔ savings are not limited by tier.
 
+### Zelle bill pay (`zelle.ts`)
+
+- Send one-time or recurring (`weekly`/`monthly`) Zelle payments from any pocket (`POST /zelle/payments`). Money leaves the customer: `dr customer_deposits`, `cr zelle_clearing`.
+- **Shortfall auto-pull**: the send draws from the source pocket first; if it is short, the remainder is pulled from the customer's other spendable pockets (checking + savings, never envelopes), each contributing its available balance in order, until the amount is covered. No pocket is overdrawn; if the source plus those pockets can't cover it the send is declined `insufficient_funds`. Zelle sends count toward the tier **transfer-out** daily/monthly limit.
+- Recurring payments create a schedule (`zelle_schedules`); the first payment sends immediately unless a future `startDate` is given, and `/admin/jobs/run-zelle` sends due runs and advances the cadence (a run that can't be funded is skipped and moves to the next period).
+- Returns/refunds arrive as **Zelle return webhooks** (`POST /webhooks/stripe`-style HMAC on `/webhooks/zelle`; `/admin/transfers/:id/zelle-return` simulates one): the full payment is reversed once, crediting the money back into the source pocket.
+- Provider (interface + fake + sandbox test mode): `FakeZelle` (deterministic, used in CI/demo) | `ZelleSandbox` (`ZELLE_ENV=sandbox` only; live refused).
+
 ### Debit cards (`cards.ts`)
 
-- Virtual: active instantly (max 3 live). Physical: `requested` until activated (max 1 live). Freeze ↔ unfreeze; replace (old → `replaced`, new card); cancel (terminal).
-- Authorization order of checks: amount → card status (frozen/canceled/replaced/requested) → account frozen → KYC → velocity (≥5 attempts in 10 min) → family rules → tier card limit → available balance (amount + fees).
+- On demand: virtual active instantly (max 3 live), physical `requested` until activated (max 1 live), tied to a **specific funding account** (default primary checking; never an envelope). Freeze ↔ unfreeze; replace (old → `replaced`, new card); cancel (terminal).
+- **Per-card limits** (optional, any card): per-transaction / daily / monthly (per-txn ≤ daily ≤ monthly), enforced on the card's own spend independently of the tier and member limits.
+- Authorization order of checks: amount → card status (frozen/canceled/replaced/requested) → account frozen → KYC → velocity (≥5 attempts in 10 min) → per-card limits → family rules → tier card limit → household monthly cap → available balance (amount + fees).
 - Approved auth places a hold (amount + fees) for 7 days. Capture: partial releases the rest; over-capture allowed within tolerance — restaurants (MCC 5812-5814) +20%, fuel (5541/5542) up to $175; otherwise 0%. Expired auths can't be captured and their hold stops counting.
 - Foreign transaction fee 3% (recomputed on capture; not refunded on merchant refund). Out-of-network ATM $2.50.
 - Merchant refunds post once per network refund id and never exceed captured − refunded.
+
+### Cashback (`cards.ts`, `config.ts`)
+
+- **1% cashback** (`cashback.rateBps`) on the captured purchase amount (not fees), credited to the card's own account on capture as its own ledger txn (`dr cashback_expense`, `cr customer_deposits`).
+- On a merchant refund the cashback is reversed **pro-rata** (`round(cashback × (refundedSoFar + refund) / captured)` incrementally), so a full refund reverses exactly the cashback earned. A dispute does not reverse cashback (only refunds do).
 
 ### Family cards (`family.ts`)
 
@@ -116,7 +141,7 @@ Monthly statement = ledger lines for the account: opening + credits − debits =
 
 ## Ledger accounts
 
-`customer_deposits` (party = account), `family_allowance` (party = member), `ach_clearing`, `card_settlement`, `fee_revenue`, `interest_expense`, `dispute_receivable`, `dispute_loss`, `ach_return_loss`, `closure_payout`.
+`customer_deposits` (party = account), `family_allowance` (party = member), `ach_clearing`, `zelle_clearing`, `card_settlement`, `fee_revenue`, `interest_expense`, `cashback_expense`, `dispute_receivable`, `dispute_loss`, `ach_return_loss`, `closure_payout`.
 
 ## Supabase
 

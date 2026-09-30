@@ -129,8 +129,19 @@ do $$ begin
   begin insert into disputes (auth_id, user_id, credit_account, credit_party, amount_cents, reason, status, provisional_credit_due_at, resolution_due_at, policy_version)
     values ('40000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', 'customer_deposits', '10000000-0000-0000-0000-00000000000a', 100, 'again', 'open', now(), now(), 1); raise exception 'SECOND OPEN DISPUTE';
   exception when unique_violation then null; end;
-  begin insert into accounts (user_id, kind, account_number, policy_version) values ('00000000-0000-0000-0000-00000000000a', 'checking', '880000000009', 1); raise exception 'SECOND CHECKING';
+  -- On-demand accounts: a user may hold multiple checking pockets now (no one-per-kind cap) ...
+  insert into accounts (user_id, kind, account_number, policy_version) values ('00000000-0000-0000-0000-00000000000a', 'checking', '880000000009', 1);
+  delete from accounts where account_number = '880000000009'; -- (cleaned up so later counts are unchanged)
+  -- ... but at most one may be the primary checking.
+  begin insert into accounts (user_id, kind, account_number, policy_version, is_primary) values
+      ('00000000-0000-0000-0000-00000000000a', 'checking', '880000000010', 1, true),
+      ('00000000-0000-0000-0000-00000000000a', 'checking', '880000000011', 1, true); raise exception 'TWO PRIMARY CHECKINGS';
   exception when unique_violation then null; end;
+  -- Envelopes must carry an end date; only checking pockets may be primary.
+  begin insert into accounts (user_id, kind, account_number, policy_version) values ('00000000-0000-0000-0000-00000000000a', 'envelope', '880000000012', 1); raise exception 'ENVELOPE WITHOUT END DATE';
+  exception when check_violation then null; end;
+  begin insert into accounts (user_id, kind, account_number, policy_version, is_primary) values ('00000000-0000-0000-0000-00000000000a', 'savings', '880000000013', 1, true); raise exception 'PRIMARY SAVINGS';
+  exception when check_violation then null; end;
   begin insert into card_authorizations (card_id, amount_cents, mcc, merchant, status, funding_account, funding_party, expires_at)
     values ('30000000-0000-0000-0000-000000000001', 100, '5411', 'x', 'declined', 'customer_deposits', '10000000-0000-0000-0000-00000000000a', now()); raise exception 'DECLINE WITHOUT REASON';
   exception when check_violation then null; end;
@@ -430,13 +441,13 @@ begin
 
   -- capture 5,900 on a 5,000 restaurant auth (tip); a second capture is refused
   perform harbor_card_capture(pg_temp.id('auth1'), 5900, 0,
-    pg_temp.ledger('card_capture', 'capture:auth1', pg_temp.dr('customer_deposits', 5900, pg_temp.id('cara_chk')), pg_temp.cr('card_settlement', 5900)), now());
+    pg_temp.ledger('card_capture', 'capture:auth1', pg_temp.dr('customer_deposits', 5900, pg_temp.id('cara_chk')), pg_temp.cr('card_settlement', 5900)), null, 0, now());
   assert (select status from holds where id = pg_temp.id('ahold1')) = 'captured', 'capture: hold consumed';
   assert (select captured_cents from card_authorizations where id = pg_temp.id('auth1')) = 5900, 'capture: amount recorded';
   assert pg_temp.posted(pg_temp.id('cara_chk')) = 6950 and pg_temp.avail(pg_temp.id('cara_chk')) = 6950, 'capture: posted = available';
   begin
     perform harbor_card_capture(pg_temp.id('auth1'), 100, 0,
-      pg_temp.ledger('card_capture', 'capture:auth1-again', pg_temp.dr('customer_deposits', 100, pg_temp.id('cara_chk')), pg_temp.cr('card_settlement', 100)), now());
+      pg_temp.ledger('card_capture', 'capture:auth1-again', pg_temp.dr('customer_deposits', 100, pg_temp.id('cara_chk')), pg_temp.cr('card_settlement', 100)), null, 0, now());
     raise exception 'FAIL second capture accepted';
   exception when raise_exception then if sqlerrm <> 'harbor:invalid_state' then raise; end if;
   end;
@@ -453,7 +464,7 @@ begin
   begin
     perform harbor_card_capture(pg_temp.id('auth3'), 1000, 30,
       pg_temp.ledger('card_capture', 'capture:auth3', pg_temp.dr('customer_deposits', 1030, pg_temp.id('cara_chk')),
-        pg_temp.cr('card_settlement', 1000), pg_temp.cr('fee_revenue', 30)), now() + interval '8 days');
+        pg_temp.cr('card_settlement', 1000), pg_temp.cr('fee_revenue', 30)), null, 0, now() + interval '8 days');
     raise exception 'FAIL capture after expiry accepted';
   exception when raise_exception then if sqlerrm <> 'harbor:auth_expired' then raise; end if;
   end;
@@ -463,20 +474,20 @@ begin
 
   -- merchant refunds on auth1 (captured 5,900)
   r := harbor_card_refund('re_atomic_1', pg_temp.id('auth1'), 900,
-    pg_temp.ledger('card_refund', 'refund:re_atomic_1', pg_temp.dr('card_settlement', 900), pg_temp.cr('customer_deposits', 900, pg_temp.id('cara_chk'))), now());
+    pg_temp.ledger('card_refund', 'refund:re_atomic_1', pg_temp.dr('card_settlement', 900), pg_temp.cr('customer_deposits', 900, pg_temp.id('cara_chk'))), null, 0, now());
   assert not (r->>'duplicate')::boolean and (r->>'refunded_cents')::bigint = 900, 'refund: posted';
   r := harbor_card_refund('re_atomic_1', pg_temp.id('auth1'), 900,
-    pg_temp.ledger('card_refund', 'refund:re_atomic_1', pg_temp.dr('card_settlement', 900), pg_temp.cr('customer_deposits', 900, pg_temp.id('cara_chk'))), now());
+    pg_temp.ledger('card_refund', 'refund:re_atomic_1', pg_temp.dr('card_settlement', 900), pg_temp.cr('customer_deposits', 900, pg_temp.id('cara_chk'))), null, 0, now());
   assert (r->>'duplicate')::boolean and (select refunded_cents from card_authorizations where id = pg_temp.id('auth1')) = 900, 'refund: once per refund id';
   begin
     perform harbor_card_refund('re_atomic_2', pg_temp.id('auth1'), 5001,
-      pg_temp.ledger('card_refund', 'refund:re_atomic_2', pg_temp.dr('card_settlement', 5001), pg_temp.cr('customer_deposits', 5001, pg_temp.id('cara_chk'))), now());
+      pg_temp.ledger('card_refund', 'refund:re_atomic_2', pg_temp.dr('card_settlement', 5001), pg_temp.cr('customer_deposits', 5001, pg_temp.id('cara_chk'))), null, 0, now());
     raise exception 'FAIL refund above captured - refunded accepted';
   exception when raise_exception then if sqlerrm <> 'harbor:refund_exceeds_captured' then raise; end if;
   end;
   begin
     perform harbor_card_refund('re_atomic_1', pg_temp.id('auth3'), 10,
-      pg_temp.ledger('card_refund', 'refund:x', pg_temp.dr('card_settlement', 10), pg_temp.cr('customer_deposits', 10, pg_temp.id('cara_chk'))), now());
+      pg_temp.ledger('card_refund', 'refund:x', pg_temp.dr('card_settlement', 10), pg_temp.cr('customer_deposits', 10, pg_temp.id('cara_chk'))), null, 0, now());
     raise exception 'FAIL refund id reused across purchases';
   exception when raise_exception then if sqlerrm <> 'harbor:refund_id_conflict' then raise; end if;
   end;
