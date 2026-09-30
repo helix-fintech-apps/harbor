@@ -1,0 +1,100 @@
+# Money-correctness gate — deterministic check set (Harbor).
+# Each entry is a machine-evaluable detector, not prose. blocking:true => a violation fails the merge.
+# detector: git-diff (fully mechanical) | static (AST/pattern on the diff) | semantic (code analysis) | test-assertion | meta
+# kind: universal (always a bug) | spec-dependent (a FINDING only when the requirement demands it)
+version: 1
+verdict_contract:
+  emit: "one verdict per check, per money-touching PR: CHECKED | FINDING | NOT_CHECKED"
+  rule: "Any FINDING or NOT_CHECKED blocks the merge. The gate renders no PASS until every check has a verdict."
+checks:
+  - id: N-DEPLOY-01
+    title: Migration immutability
+    kind: universal
+    detector: git-diff
+    fails_when: "any file under supabase/migrations/ that exists on the base branch is modified (git status M). Migrations are append-only; ship a new forward migration (or a new policy version row)."
+    applies_to: ["supabase/migrations/**"]
+    severity: high
+    blocking: true
+  - id: N-TEST-01
+    title: Test integrity (no weakening a money-invariant test)
+    kind: universal
+    detector: git-diff
+    fails_when: "a pre-existing test file changes a money assertion literal (expectCents / toBe / toEqual on a *_cents value) without a justified behavior change. A green pipeline earned by loosening a money assertion is a FINDING."
+    applies_to: ["tests/**", "e2e/**"]
+    severity: high
+    blocking: true
+  - id: N-ROUTE-01
+    title: Money-routing column integrity
+    kind: universal
+    detector: static
+    fails_when: "a migration adds a column money routing depends on (is_primary / default / primary_*) without BOTH (a) an UPDATE backfill for existing rows in the same migration and (b) a uniqueness constraint. Money must never fall to a first-returned row."
+    applies_to: ["supabase/migrations/**", "supabase/functions/_shared/app/service.ts"]
+    severity: high
+    blocking: true
+  - id: N-ORDER-01
+    title: Commit before an irreversible external call
+    kind: universal
+    detector: static
+    fails_when: "in a money-moving function, an external provider call (providers.*.send / payout / card-network) is invoked before the ledger-persisting store call (store.*Send / RPC that posts the ledger)."
+    applies_to: ["supabase/functions/_shared/app/service.ts"]
+    severity: high
+    blocking: true
+  - id: N-IDEMP
+    title: Exactly-once money
+    kind: universal
+    detector: semantic
+    fails_when: "any money-out, reversal, or recurring job lacks a stable idempotency key; a recurring job is not keyed per (schedule, period); an inbound money webhook marks the event processed BEFORE its effect is applied."
+    applies_to: ["supabase/functions/**"]
+    severity: high
+    blocking: true
+  - id: N-RWD-04
+    title: Reversal symmetry (rewards / fees)
+    kind: spec-dependent
+    detector: semantic
+    fails_when: "a reward/fee earn is not reversed on EVERY value reversal the spec requires (refund AND dispute-won AND chargeback), or the reversal magnitude is read from a snapshot instead of recomputed under the reversing lock. If the requirement is silent on a reversal path, emit requirement-not-specified."
+    applies_to: ["supabase/functions/**"]
+    severity: high
+    blocking: true
+  - id: N-ATOMIC
+    title: Atomicity & locks
+    kind: universal
+    detector: semantic
+    fails_when: "a multi-row money op is not one atomic unit; a touched balance row is not locked FOR UPDATE; an aggregate/velocity limit (tier, household, per-card) is checked from a service snapshot instead of re-checked under a lock covering the aggregate."
+    applies_to: ["supabase/migrations/**", "supabase/functions/**"]
+    severity: high
+    blocking: true
+  - id: N-PARITY-01
+    title: Dual-store guard parity
+    kind: universal
+    detector: semantic
+    fails_when: "an atomic money op exists in only one store, or MemoryStore and the PL/pgSQL function enforce different guards, or integration tests do not run on both stores."
+    applies_to: ["supabase/functions/_shared/app/store.ts", "supabase/migrations/**"]
+    severity: high
+    blocking: true
+  - id: N-CONSERVE
+    title: Conservation / double-entry
+    kind: universal
+    detector: test-assertion
+    fails_when: "the trial balance is not zero after a flow; a sweep/transfer creates or destroys value; reconciliation does not tie out."
+    applies_to: ["supabase/functions/**", "tests/**"]
+    severity: high
+    blocking: true
+  - id: N-AUTHN
+    title: Money-webhook authenticity
+    kind: universal
+    detector: static
+    fails_when: "a money-moving webhook route processes an event without first verifying a strong signature (HMAC) against a secret."
+    applies_to: ["supabase/functions/api/index.ts"]
+    severity: high
+    blocking: true
+  - id: N-COVER
+    title: Coverage
+    kind: universal
+    detector: meta
+    fails_when: "a new money endpoint/flow ships without an e2e or integration test asserting its invariant (a weakened pre-existing test does not count)."
+    applies_to: ["supabase/functions/**", "tests/**", "e2e/**"]
+    severity: medium
+    blocking: true
+notes:
+  - "The LLM is used to locate and trace code; pass/fail is pinned to these detectors, not to model judgment."
+  - "git-diff and static checks are fully deterministic today; semantic checks are the prose->code conversion frontier."
